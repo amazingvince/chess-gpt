@@ -1,178 +1,159 @@
-from transformers import PreTrainedTokenizerFast
-from tokenizers import Tokenizer, normalizers
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
-from tokenizers.processors import TemplateProcessing
-from typing import List, Tuple, Union
+from transformers import PreTrainedTokenizer
+from typing import List, Optional, Dict, Any
+import re
 
 
-class ChessTokenizer:
-    """A tokenizer for chess moves and game states."""
+class ChessTokenizer(PreTrainedTokenizer):
+    def __init__(
+        self, model_max_length: int = 512, padding_side: str = "right", **kwargs
+    ):
+        self.special_tokens = {
+            "start_token": "<|start|>",
+            "turn_token": "<|turn|>",
+            "end_token": "<|end|>",
+            "pad_token": "<|pad|>",
+            "unk_token": "<|unk|>",
+        }
 
-    # Special tokens used for the model
-    SPECIAL_TOKENS = {
-        "bos_token": "<|start|>",
-        "eos_token": "<|end|>",
-        "unk_token": "<|unk|>",
-        "pad_token": "<|pad|>",
-        "turn_token": "<|turn|>",
-    }
-
-    # Piece symbols for promotions
-    PROMOTION_TOKENS = ["q", "r", "b", "n"]
-
-    @staticmethod
-    def generate_square_tokens():
-        """Generate all possible square coordinates on a chess board.
-        revese the files so it maps to the correct square on the board
-        """
+        # Generate chess square tokens (a1-h8)
         files = "abcdefgh"[::-1]
         ranks = "12345678"
-        board = [f"{f}{r}" for f in files for r in ranks]
+        squares = [f"{f}{r}" for f in files for r in ranks]
+        promotions = ["q", "r", "b", "n"]
 
-        # print board as nice 8x8 grid
-        # for i in range(8):
-        #     print(board[i * 8 : i * 8 + 8])
-        return board
+        # Build vocabulary
+        vocab = {}
+        current_id = 0
 
-    def __init__(self):
-        """Initialize the chess tokenizer with all necessary tokens."""
-        # Combine all token types
-        self.vocabulary = (
-            list(self.SPECIAL_TOKENS.values())
-            + self.PROMOTION_TOKENS
-            + self.generate_square_tokens()
+        # Add special tokens
+        for token in self.special_tokens.values():
+            vocab[token] = current_id
+            current_id += 1
+
+        # Add squares
+        for square in squares:
+            vocab[square] = current_id
+            current_id += 1
+
+        # Add promotion pieces
+        for piece in promotions:
+            vocab[piece] = current_id
+            current_id += 1
+
+        self.vocab = vocab
+        self.ids_to_tokens = {v: k for k, v in vocab.items()}
+
+        super().__init__(
+            model_max_length=model_max_length, padding_side=padding_side, **kwargs
         )
 
-        # Create vocabulary dictionary with indices
-        vocab_dict = {token: i for i, token in enumerate(self.vocabulary)}
+    @property
+    def vocab_size(self) -> int:
+        return len(self.vocab)
 
-        # Initialize the base tokenizer with WordLevel model
-        self.tokenizer = Tokenizer(
-            WordLevel(vocab=vocab_dict, unk_token=self.SPECIAL_TOKENS["unk_token"])
-        )
+    def get_vocab(self) -> Dict[str, int]:
+        return self.vocab.copy()
 
-        # Set up pre-tokenizer to split on whitespace
-        self.tokenizer.pre_tokenizer = WhitespaceSplit()
-
-        # Set up post-processing for special tokens
-        self.tokenizer.post_processor = TemplateProcessing(
-            single="$A",  # Changed to just use the content without adding extra tokens
-            special_tokens=[],  # No special tokens in post-processing
-        )
-
-        # Create the fast tokenizer
-        self.fast_tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=self.tokenizer,
-            unk_token=self.SPECIAL_TOKENS["unk_token"],
-            bos_token=self.SPECIAL_TOKENS["bos_token"],
-            eos_token=self.SPECIAL_TOKENS["eos_token"],
-            pad_token=self.SPECIAL_TOKENS["pad_token"],
-            return_token_type_ids=False,
-        )
-
-    def save(self, path="tokenizer-chess"):
-        """Save the tokenizer to the specified path."""
-        self.fast_tokenizer.save_pretrained(path)
-
-    def encode(self, text):
-        """Encode text to token IDs."""
-        # Pre-process the text to properly split moves and preserve special tokens
+    def _tokenize(self, text: str) -> List[str]:
+        # Split on special tokens and moves
+        pattern = r"(<\|[^|]+\|>|[a-h][1-8][a-h][1-8][qrnb]?)"
         tokens = []
-        current_token = ""
-        i = 0
 
-        while i < len(text):
-            if text[i] == "<":
-                # Handle special tokens
-                end_idx = text.find(">", i)
-                if end_idx != -1:
-                    special_token = text[i : end_idx + 1]
-                    if special_token in self.SPECIAL_TOKENS.values():
-                        if current_token:
-                            tokens.extend(self._split_move(current_token))
-                            current_token = ""
-                        tokens.append(special_token)
-                        i = end_idx + 1
-                        continue
+        for match in re.finditer(pattern, text):
+            token = match.group()
+            if len(token) >= 4 and not token.startswith("<|"):  # It's a move
+                tokens.append(token[:2])  # from square
+                tokens.append(token[2:4])  # to square
+                if len(token) > 4:  # promotion piece
+                    tokens.append(token[4])
+            else:  # Special token
+                tokens.append(token)
 
-            if text[i] not in ["<", "|", ">"]:
-                current_token += text[i]
-                if len(current_token) == 4:  # Regular move
-                    tokens.extend(self._split_move(current_token))
-                    current_token = ""
-                elif len(current_token) == 5:  # Promotion move
-                    tokens.extend(self._split_promotion_move(current_token))
-                    current_token = ""
-            i += 1
+        return tokens
 
-        if current_token:
-            tokens.extend(self._split_move(current_token))
+    def _convert_token_to_id(self, token: str) -> int:
+        return self.vocab.get(token, self.vocab[self.special_tokens["unk_token"]])
 
-        # Join tokens with spaces and encode
-        return self.fast_tokenizer.encode(" ".join(tokens))
+    def _convert_id_to_token(self, index: int) -> str:
+        return self.ids_to_tokens.get(index, self.special_tokens["unk_token"])
 
-    def _split_move(self, move):
-        """Split a chess move into its components."""
-        if len(move) == 4:
-            return [move[:2], move[2:]]
-        elif len(move) == 5:
-            return self._split_promotion_move(move)
-        return [move]
+    def build_inputs_with_special_tokens(
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
+        return token_ids_0
 
-    def _split_promotion_move(self, move):
-        """Split a promotion move into its components."""
-        return [move[:2], move[2:4], move[4]]
+    def get_special_tokens_mask(
+        self,
+        token_ids_0: List[int],
+        token_ids_1: Optional[List[int]] = None,
+        already_has_special_tokens: bool = False,
+    ) -> List[int]:
+        if already_has_special_tokens:
+            return super().get_special_tokens_mask(
+                token_ids_0=token_ids_0,
+                token_ids_1=token_ids_1,
+                already_has_special_tokens=True,
+            )
 
-    def decode(self, token_ids):
-        """Decode token IDs back to text."""
-        # Get the raw decoded text
-        decoded = self.fast_tokenizer.decode(token_ids)
+        mask = [
+            1 if self.ids_to_tokens[id] in self.special_tokens.values() else 0
+            for id in token_ids_0
+        ]
+        return mask
 
-        # Post-process to remove extra spaces and combine moves
-        result = ""
-        tokens = decoded.split()
-        i = 0
-        while i < len(tokens):
-            token = tokens[i]
-            if token in self.SPECIAL_TOKENS.values():
-                result += token
-            else:
-                # Check if it's a move (two squares possibly followed by promotion piece)
-                if i + 1 < len(tokens) and len(token) == 2 and len(tokens[i + 1]) == 2:
-                    if (
-                        i + 2 < len(tokens)
-                        and len(tokens[i + 2]) == 1
-                        and tokens[i + 2] in self.PROMOTION_TOKENS
-                    ):
-                        # Promotion move
-                        result += token + tokens[i + 1] + tokens[i + 2]
-                        i += 2
-                    else:
-                        # Regular move
-                        result += token + tokens[i + 1]
-                        i += 1
-            i += 1
+    def create_token_type_ids_from_sequences(
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
+        return [0] * len(token_ids_0)
 
-        return result
+    @property
+    def pad_token(self) -> str:
+        return self.special_tokens["pad_token"]
+
+    @property
+    def unk_token(self) -> str:
+        return self.special_tokens["unk_token"]
+
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: Optional[str] = None
+    ) -> tuple:
+        import os
+        import json
+
+        if not os.path.isdir(save_directory):
+            os.makedirs(save_directory)
+
+        vocab_file = os.path.join(
+            save_directory,
+            (filename_prefix + "-" if filename_prefix else "") + "vocab.json",
+        )
+
+        with open(vocab_file, "w", encoding="utf-8") as f:
+            json.dump(self.vocab, f, ensure_ascii=False)
+
+        return (vocab_file,)
 
 
-# Usage example
+# Example usage
 if __name__ == "__main__":
-    chess_tokenizer = ChessTokenizer()
+    tokenizer = ChessTokenizer()
 
-    # Test the tokenizer with a sample move sequence
-    test_sequence = "<|start|>e2e4<|turn|>e7e5<|turn|>d7d8q<|end|>"
-    encoded = chess_tokenizer.encode(test_sequence)
-    decoded = chess_tokenizer.decode(encoded)
+    # Single string
+    game = "<|start|>e2e4<|turn|>e7e5<|turn|>d7d8q<|end|>"
+    encoded = tokenizer(game)
+    print("Single encode:", encoded)
 
-    print("Original:", test_sequence)
-    print("Encoded:", encoded)
-    print("Decoded:", decoded)
+    # Batch encoding
+    games = [
+        "<|start|>e2e4<|turn|>e7e5<|turn|>d7d8q<|end|>",
+        "<|start|>d2d4<|turn|>d7d5<|end|>",
+    ]
+    batch_encoded = tokenizer(games, padding=True, return_tensors="pt")
+    print("\nBatch encode:", batch_encoded["input_ids"])
 
-    # Print vocabulary for debugging
-    print("\nVocabulary:")
-    for i, token in enumerate(chess_tokenizer.vocabulary):
-        print(f"{i}: {token}")
+    # Decode
+    decoded = tokenizer.decode(encoded["input_ids"])
+    print("\nDecoded:", decoded)
 
-    chess_tokenizer.save()
+    print(tokenizer.decode(batch_encoded["input_ids"][0]))
+    print(tokenizer.decode(batch_encoded["input_ids"][1]))
