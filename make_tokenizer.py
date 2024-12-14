@@ -5,7 +5,7 @@ import re
 
 class ChessTokenizer(PreTrainedTokenizer):
     def __init__(
-        self, model_max_length: int = 512, padding_side: str = "right", **kwargs
+        self, model_max_length: int = 2048, padding_side: str = "right", **kwargs
     ):
         self.special_tokens = {
             "start_token": "<|start|>",
