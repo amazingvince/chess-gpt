@@ -8,16 +8,16 @@ export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
 # script arguments
-cpu_cores=$(nproc)
-NUM_WORKERS=$((cpu_cores - 4))
-NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
-NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
+# cpu_cores=$(nproc)
+# NUM_WORKERS=$((cpu_cores - 4))
+# NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
+# NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
+NUM_WORKERS=9
 hf_model_tag="chess-llama-mini-v3"
-MAX_SOURCE_LEN=1024
+MAX_SOURCE_LEN=128
 
 
 DATASET_TAG="laion/strategic_game_chess"
-# DATASET_CFG="Lichess-stockfish mix"
 
 DS_SHORT_NAME="$(basename $DATASET_TAG)"
 SHORT_NAME="$(basename $hf_model_tag)"
@@ -27,18 +27,19 @@ RUNTIME_DIR="runtime/autoregressive/$RUN_NAME"
 LOGGING_DIR="$RUNTIME_DIR/logs"
 RUN_SEED=$RANDOM
 
-TOKENIZER_NAME="/home/vince/chess_gpt_2/chess-llama"
+TOKENIZER_NAME="tokenizer-chess"
 
+export CUDA_VISIBLE_DEVICES=0
 NUM_EPOCHS=1
 LEARNING_RATE=4e-4
 WARMUP_RATIO=100
-BATCH_SIZE=8
+BATCH_SIZE=2
 EVAL_BATCH_SIZE=8
 WEIGHT_DECAY=0.1
 
 # optimizer
 OPTIMIZER_ID="adamw_torch_fused" # adamw_8bit
-GC_STEPS=8
+GC_STEPS=1
 OPTIM_BETA1=0.90
 OPTIM_BETA2=0.95
 LR_SCHEDULER_TYPE="constant"
@@ -68,15 +69,7 @@ DEEPSPEED_CONFIG="deepspeed.json"
 mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
-pip install -U -q wandb
-
-#     --block_size $MAX_SOURCE_LEN \
-# --config_name
-# --model_name_or_path
-# python run_clm.py \
-# --dataset_config_name "$DATASET_CFG" \
-# NCCL_P2P_DISABLE=0 NCCL_IB_DISABLE=0
-ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 run_clm.py \
+ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 --gpu_ids 0 run_clm.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
@@ -85,7 +78,6 @@ ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 run_clm.py \
     --num_train_epochs $NUM_EPOCHS \
     --save_strategy $SAVE_STRATEGY \
     --evaluation_strategy $EVAL_STRATEGY \
-    --block_size 1024 \
     --data_seed $RANDOM \
     --dataloader_num_workers $NUM_WORKERS \
     --dataloader_pin_memory True \
@@ -124,12 +116,4 @@ ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 run_clm.py \
     --block_size $MAX_SOURCE_LEN \
     --use_fast_tokenizer True \
     --trust_remote_code True  \
-    --max_steps 10000000 \
-    # --torch_compile_backend inductor \
-    # --streaming True 
-
-#    --max_steps 1000
-#    --deepspeed $DEEPSPEED_CONFIG \
-
-# --resume_from_checkpoint $CHECKPOINT_PATH
-#    --max_steps 125 \
+    --max_steps 1000
