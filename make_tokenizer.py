@@ -1,119 +1,178 @@
 from transformers import PreTrainedTokenizerFast
-
-# fast_tokenizer = PreTrainedTokenizerFast(tokenizer_file="tokenizer.json")
-
-from tokenizers import Tokenizer, normalizers, pre_tokenizers
-from tokenizers.models import BPE, WordLevel
-from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace, WhitespaceSplit
-from transformers import PreTrainedTokenizerFast
+from tokenizers import Tokenizer, normalizers
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
+from tokenizers.processors import TemplateProcessing
+from typing import List, Tuple, Union
 
 
-# 
+class ChessTokenizer:
+    """A tokenizer for chess moves and game states."""
 
-files = ['<|start|>', '<|end|>', '<|turn|>', '<|unk|>', '<|pad|>',
-         '1/2-1/2', '1-0', '0-1',
-         'FIVEFOLD_REPETITION', 'INSUFFICIENT_MATERIAL', 'STALEMATE', 'CHECKMATE', 'SEVENTYFIVE_MOVES', 
-         'Q', 'R', 'B', 'N', 
-         'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 
-         'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 
-         'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 
-         'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd8', 
-         'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8', 
-         'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 
-         'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8',
-         'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8',
-         ]
+    # Special tokens used for the model
+    SPECIAL_TOKENS = {
+        "bos_token": "<|start|>",
+        "eos_token": "<|end|>",
+        "unk_token": "<|unk|>",
+        "pad_token": "<|pad|>",
+        "turn_token": "<|turn|>",
+    }
+
+    # Piece symbols for promotions
+    PROMOTION_TOKENS = ["q", "r", "b", "n"]
+
+    @staticmethod
+    def generate_square_tokens():
+        """Generate all possible square coordinates on a chess board.
+        revese the files so it maps to the correct square on the board
+        """
+        files = "abcdefgh"[::-1]
+        ranks = "12345678"
+        board = [f"{f}{r}" for f in files for r in ranks]
+
+        # print board as nice 8x8 grid
+        # for i in range(8):
+        #     print(board[i * 8 : i * 8 + 8])
+        return board
+
+    def __init__(self):
+        """Initialize the chess tokenizer with all necessary tokens."""
+        # Combine all token types
+        self.vocabulary = (
+            list(self.SPECIAL_TOKENS.values())
+            + self.PROMOTION_TOKENS
+            + self.generate_square_tokens()
+        )
+
+        # Create vocabulary dictionary with indices
+        vocab_dict = {token: i for i, token in enumerate(self.vocabulary)}
+
+        # Initialize the base tokenizer with WordLevel model
+        self.tokenizer = Tokenizer(
+            WordLevel(vocab=vocab_dict, unk_token=self.SPECIAL_TOKENS["unk_token"])
+        )
+
+        # Set up pre-tokenizer to split on whitespace
+        self.tokenizer.pre_tokenizer = WhitespaceSplit()
+
+        # Set up post-processing for special tokens
+        self.tokenizer.post_processor = TemplateProcessing(
+            single="$A",  # Changed to just use the content without adding extra tokens
+            special_tokens=[],  # No special tokens in post-processing
+        )
+
+        # Create the fast tokenizer
+        self.fast_tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=self.tokenizer,
+            unk_token=self.SPECIAL_TOKENS["unk_token"],
+            bos_token=self.SPECIAL_TOKENS["bos_token"],
+            eos_token=self.SPECIAL_TOKENS["eos_token"],
+            pad_token=self.SPECIAL_TOKENS["pad_token"],
+            return_token_type_ids=False,
+        )
+
+    def save(self, path="tokenizer-chess"):
+        """Save the tokenizer to the specified path."""
+        self.fast_tokenizer.save_pretrained(path)
+
+    def encode(self, text):
+        """Encode text to token IDs."""
+        # Pre-process the text to properly split moves and preserve special tokens
+        tokens = []
+        current_token = ""
+        i = 0
+
+        while i < len(text):
+            if text[i] == "<":
+                # Handle special tokens
+                end_idx = text.find(">", i)
+                if end_idx != -1:
+                    special_token = text[i : end_idx + 1]
+                    if special_token in self.SPECIAL_TOKENS.values():
+                        if current_token:
+                            tokens.extend(self._split_move(current_token))
+                            current_token = ""
+                        tokens.append(special_token)
+                        i = end_idx + 1
+                        continue
+
+            if text[i] not in ["<", "|", ">"]:
+                current_token += text[i]
+                if len(current_token) == 4:  # Regular move
+                    tokens.extend(self._split_move(current_token))
+                    current_token = ""
+                elif len(current_token) == 5:  # Promotion move
+                    tokens.extend(self._split_promotion_move(current_token))
+                    current_token = ""
+            i += 1
+
+        if current_token:
+            tokens.extend(self._split_move(current_token))
+
+        # Join tokens with spaces and encode
+        return self.fast_tokenizer.encode(" ".join(tokens))
+
+    def _split_move(self, move):
+        """Split a chess move into its components."""
+        if len(move) == 4:
+            return [move[:2], move[2:]]
+        elif len(move) == 5:
+            return self._split_promotion_move(move)
+        return [move]
+
+    def _split_promotion_move(self, move):
+        """Split a promotion move into its components."""
+        return [move[:2], move[2:4], move[4]]
+
+    def decode(self, token_ids):
+        """Decode token IDs back to text."""
+        # Get the raw decoded text
+        decoded = self.fast_tokenizer.decode(token_ids)
+
+        # Post-process to remove extra spaces and combine moves
+        result = ""
+        tokens = decoded.split()
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token in self.SPECIAL_TOKENS.values():
+                result += token
+            else:
+                # Check if it's a move (two squares possibly followed by promotion piece)
+                if i + 1 < len(tokens) and len(token) == 2 and len(tokens[i + 1]) == 2:
+                    if (
+                        i + 2 < len(tokens)
+                        and len(tokens[i + 2]) == 1
+                        and tokens[i + 2] in self.PROMOTION_TOKENS
+                    ):
+                        # Promotion move
+                        result += token + tokens[i + 1] + tokens[i + 2]
+                        i += 2
+                    else:
+                        # Regular move
+                        result += token + tokens[i + 1]
+                        i += 1
+            i += 1
+
+        return result
 
 
-tokenizer = Tokenizer(BPE())
-# tokenizer.normalizer = normalizers.BertNormalizer(lowercase=False)
+# Usage example
+if __name__ == "__main__":
+    chess_tokenizer = ChessTokenizer()
 
-tokenizer.pre_tokenizer = WhitespaceSplit()
+    # Test the tokenizer with a sample move sequence
+    test_sequence = "<|start|>e2e4<|turn|>e7e5<|turn|>d7d8q<|end|>"
+    encoded = chess_tokenizer.encode(test_sequence)
+    decoded = chess_tokenizer.decode(encoded)
 
-tokenizer.add_tokens(files)
+    print("Original:", test_sequence)
+    print("Encoded:", encoded)
+    print("Decoded:", decoded)
 
-t = PreTrainedTokenizerFast(
-    tokenizer_object=tokenizer,
-    unk_token="<|unk|>",
-    bos_token = "<|start|>",
-    eos_token = "<|end|>",
-    pad_token="<|pad|>",
-    special_tokens=[ '<|start|>', '<|end|>', '<|unk|>', '<|pad|>',  'FIVEFOLD_REPETITION', 'INSUFFICIENT_MATERIAL', 'STALEMATE', 'CHECKMATE', 'SEVENTYFIVE_MOVES', '1/2-1/2', '1-0', '0-1'],
-    return_token_type_ids=False,
-)
+    # Print vocabulary for debugging
+    print("\nVocabulary:")
+    for i, token in enumerate(chess_tokenizer.vocabulary):
+        print(f"{i}: {token}")
 
-
-
-t.save_pretrained("tokenizer-chess-2")
-
-
-# t.save("tokenizer-chess.json")
-
-from transformers import AutoTokenizer
-
-# t = AutoTokenizer.from_pretrained("BEE-spoke-data/verysmol_llama-v11-KIx2")
-
-# print(t("<|start|> P d2 d4 <|turn|> N g8 f6 <|turn|> P c2 c4 <|turn|> P e7 e6 <|turn|> N g1 f3 <|turn|> P b7 b6 <|turn|> P g2 g3 <|turn|> B c8 b7 <|turn|> B f1 g2 <|turn|> B f8 e7 <|turn|> N b1 c3 <|turn|> P d7 d5 <|turn|> B c1 g5 <|turn|> N b8 d7 <|turn|> P c4 d5 <|turn|> N f6 d5 <|turn|> B g5 e7 <|turn|> N d5 e7 <|turn|> P e2 e4 <|turn|> P h7 h6 <|turn|> Q d1 e2 <|turn|> P a7 a5 <|turn|> Q e2 e3 <|turn|> B b7 a6 <|turn|> B g2 f1 <|turn|> B a6 b7 <|turn|> B f1 e2 <|turn|> P c7 c5 <|turn|> B e2 b5 <|turn|> B b7 c6 <|turn|> R a1 d1 <|turn|> B c6 b5 <|turn|> N c3 b5 <|turn|> K e8 g8 <|turn|> K e1 g1 <|turn|> Q d8 c8 <|turn|> Q e3 e2 <|turn|> Q c8 b7 <|turn|> R d1 d2 <|turn|> R f8 d8 <|turn|> R d2 c2 <|turn|> N d7 f6 <|turn|> R f1 e1 <|turn|> P c5 d4 <|turn|> R c2 c7 <|turn|> P d4 d3 <|turn|> R c7 b7 <|turn|> P d3 e2 <|turn|> R b7 e7 <|turn|> R d8 d1 <|turn|> K g1 g2 <|turn|> K g8 f8 <|turn|> R e7 b7 <|turn|> R a8 d8 <|turn|> R e1 e2 <|turn|> N f6 d7 <|turn|> R e2 e3 <|turn|> K f8 g8 <|turn|> P e4 e5 <|turn|> R d1 d5 <|turn|> N b5 c3 <|turn|> R d5 c5 <|turn|> R e3 d3 <|turn|> P f7 f6 <|turn|> P e5 f6 <|turn|> R c5 d5 <|turn|> N c3 d5 <|turn|> P e6 d5 <|turn|> R d3 d5 <|turn|> P b6 b5 <|turn|> R d5 d7 <|turn|> R d8 d7 <|turn|> R b7 d7 <|turn|> P g7 g6 <|turn|> N f3 e5 <|turn|> P g6 g5 <|turn|> N e5 g6 <|turn|> P h6 h5 <|turn|> R d7 g7 <|turn|>", return_token_type_ids=False))
-
-
-
-
-
-"""
-from transformers import PreTrainedTokenizerFast
-
-# fast_tokenizer = PreTrainedTokenizerFast(tokenizer_file="tokenizer.json")
-
-from tokenizers import Tokenizer, normalizers, pre_tokenizers
-from tokenizers.models import BPE, WordLevel
-from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace, WhitespaceSplit
-from transformers import PreTrainedTokenizerFast
-
-
-# 
-
-files = {k:i for i, k in enumerate([
-         '<|turn|>', '<|unk|>', '<|pad|>', '<|start|>', '<|end|>'
-         'K', 'Q', 'R', 'B', 'N', 'P', 
-         'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 
-         'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 
-         'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 
-         'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd8', 
-         'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8', 
-         'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 
-         'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8',
-         'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8'])}
-
-
-tokenizer = Tokenizer(BPE(files, [], unk_token="<|unk|>"))
-# tokenizer.normalizer = normalizers.BertNormalizer(lowercase=False)
-
-tokenizer.pre_tokenizer = WhitespaceSplit()
-
-t = PreTrainedTokenizerFast(
-    tokenizer_object=tokenizer,
-    unk_token="<|unk|>",
-    bos_token = "<|start|>",
-    eos_token = "<|end|>",
-    pad_token="<|pad|>",
-    special_tokens=['<|turn|>', '<|unk|>', '<|pad|>', '<|start|>', '<|end|>'],
-    return_token_type_ids=False
-)
-
-# tokenizer.add_tokens(files)
-
-# t.save_pretrained("tokenizer-chess")
-
-
-# t.save("tokenizer-chess.json")
-
-from transformers import AutoTokenizer
-
-# t = AutoTokenizer.from_pretrained("BEE-spoke-data/verysmol_llama-v11-KIx2")
-
-print(t.tokenize("P d2 d4 <|turn|> N g8 f6 <|turn|> P c2 c4 <|turn|> P e7 e6 <|turn|> N g1 f3 <|turn|> P b7 b6 <|turn|> P g2 g3 <|turn|> B c8 b7 <|turn|> B f1 g2 <|turn|> B f8 e7 <|turn|> N b1 c3 <|turn|> P d7 d5 <|turn|> B c1 g5 <|turn|> N b8 d7 <|turn|> P c4 d5 <|turn|> N f6 d5 <|turn|> B g5 e7 <|turn|> N d5 e7 <|turn|> P e2 e4 <|turn|> P h7 h6 <|turn|> Q d1 e2 <|turn|> P a7 a5 <|turn|> Q e2 e3 <|turn|> B b7 a6 <|turn|> B g2 f1 <|turn|> B a6 b7 <|turn|> B f1 e2 <|turn|> P c7 c5 <|turn|> B e2 b5 <|turn|> B b7 c6 <|turn|> R a1 d1 <|turn|> B c6 b5 <|turn|> N c3 b5 <|turn|> K e8 g8 <|turn|> K e1 g1 <|turn|> Q d8 c8 <|turn|> Q e3 e2 <|turn|> Q c8 b7 <|turn|> R d1 d2 <|turn|> R f8 d8 <|turn|> R d2 c2 <|turn|> N d7 f6 <|turn|> R f1 e1 <|turn|> P c5 d4 <|turn|> R c2 c7 <|turn|> P d4 d3 <|turn|> R c7 b7 <|turn|> P d3 e2 <|turn|> R b7 e7 <|turn|> R d8 d1 <|turn|> K g1 g2 <|turn|> K g8 f8 <|turn|> R e7 b7 <|turn|> R a8 d8 <|turn|> R e1 e2 <|turn|> N f6 d7 <|turn|> R e2 e3 <|turn|> K f8 g8 <|turn|> P e4 e5 <|turn|> R d1 d5 <|turn|> N b5 c3 <|turn|> R d5 c5 <|turn|> R e3 d3 <|turn|> P f7 f6 <|turn|> P e5 f6 <|turn|> R c5 d5 <|turn|> N c3 d5 <|turn|> P e6 d5 <|turn|> R d3 d5 <|turn|> P b6 b5 <|turn|> R d5 d7 <|turn|> R d8 d7 <|turn|> R b7 d7 <|turn|> P g7 g6 <|turn|> N f3 e5 <|turn|> P g6 g5 <|turn|> N e5 g6 <|turn|> P h6 h5 <|turn|> R d7 g7 <|turn|>", return_token_type_ids=False))
-
-
-"""
+    chess_tokenizer.save()
