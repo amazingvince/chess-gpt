@@ -12,9 +12,9 @@ echo "wandb watching: $WANDB_WATCH"
 # NUM_WORKERS=$((cpu_cores - 4))
 # NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
 # NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
-NUM_WORKERS=9
+NUM_WORKERS=4
 hf_model_tag="chess-llama-mini-v3"
-MAX_SOURCE_LEN=128
+MAX_SOURCE_LEN=2048
 
 
 DATASET_TAG="laion/strategic_game_chess"
@@ -33,7 +33,7 @@ export CUDA_VISIBLE_DEVICES=0
 NUM_EPOCHS=1
 LEARNING_RATE=4e-4
 WARMUP_RATIO=100
-BATCH_SIZE=2
+BATCH_SIZE=64
 EVAL_BATCH_SIZE=8
 WEIGHT_DECAY=0.1
 
@@ -69,7 +69,7 @@ DEEPSPEED_CONFIG="deepspeed.json"
 mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
-ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 --gpu_ids 0 run_clm.py \
+ACCELERATE_LOG_LEVEL=info accelerate launch run_clm_old.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
@@ -116,4 +116,4 @@ ACCELERATE_LOG_LEVEL=info accelerate launch --num_processes 1 --gpu_ids 0 run_cl
     --block_size $MAX_SOURCE_LEN \
     --use_fast_tokenizer True \
     --trust_remote_code True  \
-    --max_steps 1000
+    --max_steps 1000000
