@@ -1,0 +1,5 @@
+{
+    "editor.formatOnSave": true,        // Enable format on save
+    "python.linting.enabled": true,    // Enable linting
+    "python.linting.ruffEnabled": true // Use Ruff as the linter
+  }
