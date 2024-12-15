@@ -16,8 +16,9 @@ class ChessLlamaForCausalLM(LlamaForCausalLM):
     def forward(
         self,
         input_ids=None,
-        # fen_positions=None,
+        fen_input_ids=None,
         attention_mask=None,
+        fen_attention_mask=None,
         position_ids=None,
         past_key_values=None,
         inputs_embeds=None,
@@ -49,6 +50,14 @@ class ChessLlamaForCausalLM(LlamaForCausalLM):
         if inputs_embeds is None:
             # Get token embeddings
             inputs_embeds = self.model.embed_tokens(input_ids)
+
+        if fen_input_ids is not None:
+            fen_outputs = self.fen_encoder(
+                input_ids=fen_input_ids,
+                attention_mask=fen_attention_mask,
+                return_dict=True
+            )
+            inputs_embeds = inputs_embeds + fen_outputs
 
         # Add custom positional embeddings
         pos_embeds = self.custom_position_embeddings(position_ids)
