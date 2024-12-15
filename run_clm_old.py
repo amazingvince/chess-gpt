@@ -21,6 +21,7 @@ https://huggingface.co/models?filter=text-generation
 """
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
+from model.chess_llama import ChessLlamaForCausalLM
 import logging
 import math
 import os
@@ -430,7 +431,7 @@ def main():
             if model_args.torch_dtype in ["auto", None]
             else getattr(torch, model_args.torch_dtype)
         )
-        model = AutoModelForCausalLM.from_pretrained(
+        model = ChessLlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,
@@ -443,12 +444,8 @@ def main():
             attn_implementation="flash_attention_2",
         )
     else:
-        model = AutoModelForCausalLM.from_config(
-            config,
-            trust_remote_code=model_args.trust_remote_code,
-            attn_implementation="flash_attention_2",
-            torch_dtype=torch.bfloat16,
-        )
+        config.attn_implementation = "flash_attention_2"
+        model = ChessLlamaForCausalLM(config)
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"

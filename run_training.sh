@@ -8,7 +8,7 @@ export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
 # Whether to wait for a debugger to attach
-export ENABLE_DEBUGPY=0
+export ENABLE_DEBUGPY=1
 
 # script arguments
 # cpu_cores=$(nproc)
