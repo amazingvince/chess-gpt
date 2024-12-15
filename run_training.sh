@@ -12,7 +12,7 @@ echo "wandb watching: $WANDB_WATCH"
 # NUM_WORKERS=$((cpu_cores - 4))
 # NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
 # NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
-NUM_WORKERS=4
+NUM_WORKERS=8
 hf_model_tag="chess-llama-mini-v3"
 MAX_SOURCE_LEN=2048
 
@@ -34,7 +34,7 @@ NUM_EPOCHS=1
 LEARNING_RATE=4e-4
 WARMUP_RATIO=100
 BATCH_SIZE=64
-EVAL_BATCH_SIZE=8
+EVAL_BATCH_SIZE=32
 WEIGHT_DECAY=0.1
 
 # optimizer
@@ -59,8 +59,8 @@ DATA_TYPE="--bf16 --bf16_full_eval True"
 USE_TF32=True
 
 # eval
-EVAL_STRATEGY=no #epoch, steps, no
-EVAL_STEPS=200
+EVAL_STRATEGY=steps #epoch, steps, no
+EVAL_STEPS=1000
 MAX_EVAL_SAMPLES=2048
 
 DEEPSPEED_CONFIG="deepspeed.json"
@@ -73,6 +73,7 @@ ACCELERATE_LOG_LEVEL=info accelerate launch run_clm_old.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
+    --do_eval \
     --streaming True \
     --config_name "chess-llama/config.json" \
     --num_train_epochs $NUM_EPOCHS \

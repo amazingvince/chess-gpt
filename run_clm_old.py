@@ -49,6 +49,7 @@ from transformers import (
     default_data_collator,
     is_torch_tpu_available,
     set_seed,
+    is_torch_xla_available,
 )
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
@@ -429,7 +430,7 @@ def main():
         "trust_remote_code": model_args.trust_remote_code,
     }
 
-    from make_tokenizer import ChessTokenizer
+    from tokenizer import ChessTokenizer
 
     tokenizer = ChessTokenizer()
 
@@ -578,15 +579,46 @@ def main():
     training_args.use_liger_kernel = True
     training_args.include_num_input_tokens_seen = True
     # Initialize our Trainer
+
+    if training_args.do_eval:
+
+        eval_dataset = train_dataset.take(1000)
+
+        def preprocess_logits_for_metrics(logits, labels):
+            if isinstance(logits, tuple):
+                # Depending on the model and config, logits may contain extra tensors,
+                # like past_key_values, but logits always come first
+                logits = logits[0]
+            return logits.argmax(dim=-1)
+
+        metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
+
+        def compute_metrics(eval_preds):
+            preds, labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics but we need to shift the labels
+            labels = labels[:, 1:].reshape(-1)
+            preds = preds[:, :-1].reshape(-1)
+            return metric.compute(predictions=preds, references=labels)
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        compute_metrics=None,
+        compute_metrics=(
+            compute_metrics
+            if training_args.do_eval and not is_torch_xla_available()
+            else None
+        ),
+        preprocess_logits_for_metrics=(
+            preprocess_logits_for_metrics
+            if training_args.do_eval and not is_torch_xla_available()
+            else None
+        ),
     )
 
     # Training
