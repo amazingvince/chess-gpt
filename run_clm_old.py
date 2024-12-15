@@ -34,7 +34,7 @@ import json
 import datasets
 import evaluate
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 import transformers
 from transformers import (
@@ -583,6 +583,7 @@ def main():
     if training_args.do_eval:
 
         eval_dataset = train_dataset.take(1000)
+        eval_dataset = Dataset.from_list(list(eval_dataset))
 
         def preprocess_logits_for_metrics(logits, labels):
             if isinstance(logits, tuple):
