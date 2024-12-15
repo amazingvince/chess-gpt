@@ -673,4 +673,8 @@ def _mp_fn(index):
 
 
 if __name__ == "__main__":
+    if os.environ.get('ENABLE_DEBUGPY'):
+        import debugpy
+        debugpy.listen(5678)
+        debugpy.wait_for_client()
     main()

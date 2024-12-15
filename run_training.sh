@@ -7,6 +7,9 @@ export WANDB_WATCH="gradients"
 export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
+# Whether to wait for a debugger to attach
+export ENABLE_DEBUGPY=0
+
 # script arguments
 # cpu_cores=$(nproc)
 # NUM_WORKERS=$((cpu_cores - 4))

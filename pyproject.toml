@@ -18,6 +18,7 @@ dependencies = [
     "scikit-learn>=1.0.1",
     "liger-kernel>=0.5.2",
     "flash-attn>=2.7.2.post1",
+    "debugpy>=1.8.11",
 ]
 
 [tool.uv.sources]
