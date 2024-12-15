@@ -72,7 +72,7 @@ DEEPSPEED_CONFIG="deepspeed.json"
 mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
-ACCELERATE_LOG_LEVEL=info accelerate launch run_clm_old.py \
+ACCELERATE_LOG_LEVEL=info accelerate launch run_clm.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
