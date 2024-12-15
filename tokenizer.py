@@ -1,7 +1,8 @@
 from transformers import PreTrainedTokenizer
 from typing import List, Optional, Dict, Any
 import re
-
+import chess
+from transformers.tokenization_utils import BatchEncoding
 
 class ChessTokenizer(PreTrainedTokenizer):
     def __init__(
@@ -53,23 +54,56 @@ class ChessTokenizer(PreTrainedTokenizer):
 
     def get_vocab(self) -> Dict[str, int]:
         return self.vocab.copy()
+    
+    def _batch_encode_plus(
+        self,
+        batch_text_or_text_pairs,
+        **kwargs,
+    ) -> BatchEncoding:
+        del kwargs  # Unused
+        input_ids = []
+        fen_positions = []
+        for text in batch_text_or_text_pairs:
+            tokenized_text = self._tokenize(text)
+            ids = self.convert_tokens_to_ids(tokenized_text["text"])
+            input_ids.append((ids, None))
+            fen_positions.append(tokenized_text["fen_positions"])
+
+        batch_outputs = self._batch_prepare_for_model(
+            input_ids,
+        )
+        batch_outputs["fen_positions"] = fen_positions
+
+        return BatchEncoding(batch_outputs)
 
     def _tokenize(self, text: str) -> List[str]:
         # Split on special tokens and moves
         pattern = r"(<\|[^|]+\|>|[a-h][1-8][a-h][1-8][qrnb]?)"
         tokens = []
+        fen_positions = []
+        board = chess.Board()
 
         for match in re.finditer(pattern, text):
             token = match.group()
             if len(token) >= 4 and not token.startswith("<|"):  # It's a move
-                tokens.append(token[:2])  # from square
-                tokens.append(token[2:4])  # to square
+                from_square = token[:2]
+                to_square = token[2:4]  # to square
+                tokens.extend([from_square, to_square])
+                # Add fen position of previous move
+                fen_positions.extend(2*[board.fen()])
+                promotion = ''
                 if len(token) > 4:  # promotion piece
-                    tokens.append(token[4])
+                    promotion = token[4]
+                    tokens.append(promotion)
+                    fen_positions.append(board.fen())
+                # Update fen position
+                move = chess.Move.from_uci(from_square + to_square + promotion)
+                board.push(move)
             else:  # Special token
                 tokens.append(token)
+                fen_positions.append(board.fen())
 
-        return tokens
+        return {"text": tokens, "fen_positions": fen_positions}
 
     def _convert_token_to_id(self, token: str) -> int:
         return self.vocab.get(token, self.vocab[self.special_tokens["unk_token"]])

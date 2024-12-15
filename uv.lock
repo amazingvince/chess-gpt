@@ -193,6 +193,12 @@ wheels = [
 ]
 
 [[package]]
+name = "chess"
+version = "1.11.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/16/53b895bb4fccede8e506de820fa94db03a2dc8bd2ca4bec0aac4a112fb65/chess-1.11.1.tar.gz", hash = "sha256:b7f66a32dc599ab260e2b688e6ac4e868dad840377a54b61357e2dec2a5fed00", size = 156529 }
+
+[[package]]
 name = "chess-gpt"
 version = "0.1.0"
 source = { virtual = "." }
@@ -204,6 +210,7 @@ dependencies = [
     { name = "evaluate" },
     { name = "flash-attn" },
     { name = "liger-kernel" },
+    { name = "python-chess" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "setuptools" },
@@ -224,6 +231,7 @@ requires-dist = [
     { name = "evaluate", specifier = ">=0.4.3" },
     { name = "flash-attn", specifier = ">=2.7.2.post1" },
     { name = "liger-kernel", specifier = ">=0.5.2" },
+    { name = "python-chess", specifier = ">=1.999" },
     { name = "ruff", specifier = ">=0.8.3" },
     { name = "scikit-learn", specifier = ">=1.0.1" },
     { name = "setuptools", specifier = ">=75.6.0" },
@@ -1229,6 +1237,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/78/d8/c080592d80edd3441ab7f88f865f51dae94a157fc64283c680e9f32cf6da/pydantic_core-2.27.1-cp313-none-win32.whl", hash = "sha256:8065914ff79f7eab1599bd80406681f0ad08f8e47c880f17b416c9f8f7a26d05", size = 1833713 },
     { url = "https://files.pythonhosted.org/packages/83/84/5ab82a9ee2538ac95a66e51f6838d6aba6e0a03a42aa185ad2fe404a4e8f/pydantic_core-2.27.1-cp313-none-win_amd64.whl", hash = "sha256:ba630d5e3db74c79300d9a5bdaaf6200172b107f263c98a0539eeecb857b2337", size = 1987897 },
     { url = "https://files.pythonhosted.org/packages/df/c3/b15fb833926d91d982fde29c0624c9f225da743c7af801dace0d4e187e71/pydantic_core-2.27.1-cp313-none-win_arm64.whl", hash = "sha256:45cf8588c066860b623cd11c4ba687f8d7175d5f7ef65f7129df8a394c502de5", size = 1882983 },
+]
+
+[[package]]
+name = "python-chess"
+version = "1.999"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "chess" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5f/60/7c7d132b6683ff215bf705fc55ffc0240a6cddea89657407ca0a4fb628d0/python-chess-1.999.tar.gz", hash = "sha256:8cad0388c42242d890ac6368ad64def15cd0165db033df0ad479492e266e5e6c", size = 1453 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/47/dfebc06e589530691d33c71bc7b3d8d311252b58ae338980fd4327fe77f2/python_chess-1.999-py3-none-any.whl", hash = "sha256:93b562f8f1124cb7bf56fb095e18743758e69dc6a028ccda0badcaa5c59d88c8", size = 1401 },
 ]
 
 [[package]]

@@ -308,8 +308,6 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    training_args.split_batches = False
-
     if model_args.use_auth_token is not None:
         warnings.warn(
             "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead.",
@@ -421,14 +419,6 @@ def main():
             logger.info(f"Overriding config: {model_args.config_overrides}")
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
-
-    tokenizer_kwargs = {
-        "cache_dir": model_args.cache_dir,
-        "use_fast": model_args.use_fast_tokenizer,
-        "revision": model_args.model_revision,
-        "token": model_args.token,
-        "trust_remote_code": model_args.trust_remote_code,
-    }
 
     from tokenizer import ChessTokenizer
 
@@ -546,22 +536,6 @@ def main():
             )
         block_size = min(data_args.block_size, tokenizer.model_max_length)
 
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
-        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
-        total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
     # to preprocess.
@@ -572,7 +546,8 @@ def main():
     if training_args.do_train:
         if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = tokenized_datasets["train"]
+        # Skip first 1000 samples to use for eval
+        train_dataset = tokenized_datasets["train"].skip(1000)
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
@@ -581,9 +556,8 @@ def main():
     # Initialize our Trainer
 
     if training_args.do_eval:
-
-        eval_dataset = train_dataset.take(1000)
-        eval_dataset = Dataset.from_list(list(eval_dataset))
+        # Take first 1000 samples for eval
+        eval_dataset = tokenized_datasets["train"].take(1000)
 
         def preprocess_logits_for_metrics(logits, labels):
             if isinstance(logits, tuple):
