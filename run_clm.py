@@ -21,6 +21,7 @@ https://huggingface.co/models?filter=text-generation
 """
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
+from model.chess_llama import ChessLlamaForCausalLM
 import logging
 import math
 import os
@@ -34,7 +35,7 @@ import json
 import datasets
 import evaluate
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 import transformers
 from transformers import (
@@ -49,6 +50,7 @@ from transformers import (
     default_data_collator,
     is_torch_tpu_available,
     set_seed,
+    is_torch_xla_available,
 )
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
@@ -419,15 +421,7 @@ def main():
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
 
-    tokenizer_kwargs = {
-        "cache_dir": model_args.cache_dir,
-        "use_fast": model_args.use_fast_tokenizer,
-        "revision": model_args.model_revision,
-        "token": model_args.token,
-        "trust_remote_code": model_args.trust_remote_code,
-    }
-
-    from make_tokenizer import ChessTokenizer
+    from tokenizer import ChessTokenizer
 
     tokenizer = ChessTokenizer()
 
@@ -437,7 +431,7 @@ def main():
             if model_args.torch_dtype in ["auto", None]
             else getattr(torch, model_args.torch_dtype)
         )
-        model = AutoModelForCausalLM.from_pretrained(
+        model = ChessLlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,
@@ -447,11 +441,11 @@ def main():
             trust_remote_code=model_args.trust_remote_code,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
+            attn_implementation="flash_attention_2",
         )
     else:
-        model = AutoModelForCausalLM.from_config(
-            config, trust_remote_code=model_args.trust_remote_code
-        )
+        config.attn_implementation = "flash_attention_2"
+        model = ChessLlamaForCausalLM(config)
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
@@ -518,7 +512,7 @@ def main():
         max_pos_embeddings = config.max_position_embeddings
     else:
         # Define a default value if the attribute is missing in the config.
-        max_pos_embeddings = 1024
+        max_pos_embeddings = 2048
 
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -539,22 +533,6 @@ def main():
             )
         block_size = min(data_args.block_size, tokenizer.model_max_length)
 
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
-        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
-        total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
     # to preprocess.
@@ -565,21 +543,54 @@ def main():
     if training_args.do_train:
         if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = tokenized_datasets["train"]
+        # Skip first 1000 samples to use for eval
+        train_dataset = tokenized_datasets["train"].skip(1000)
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
-
+    training_args.use_liger_kernel = True
+    training_args.include_num_input_tokens_seen = True
     # Initialize our Trainer
+
+    if training_args.do_eval:
+        # Take first 1000 samples for eval
+        eval_dataset = tokenized_datasets["train"].take(1000)
+
+        def preprocess_logits_for_metrics(logits, labels):
+            if isinstance(logits, tuple):
+                # Depending on the model and config, logits may contain extra tensors,
+                # like past_key_values, but logits always come first
+                logits = logits[0]
+            return logits.argmax(dim=-1)
+
+        metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
+
+        def compute_metrics(eval_preds):
+            preds, labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics but we need to shift the labels
+            labels = labels[:, 1:].reshape(-1)
+            preds = preds[:, :-1].reshape(-1)
+            return metric.compute(predictions=preds, references=labels)
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        compute_metrics=None,
+        compute_metrics=(
+            compute_metrics
+            if training_args.do_eval and not is_torch_xla_available()
+            else None
+        ),
+        preprocess_logits_for_metrics=(
+            preprocess_logits_for_metrics
+            if training_args.do_eval and not is_torch_xla_available()
+            else None
+        ),
     )
 
     # Training
@@ -633,4 +644,8 @@ def _mp_fn(index):
 
 
 if __name__ == "__main__":
+    if os.environ.get('ENABLE_DEBUGPY'):
+        import debugpy
+        debugpy.listen(5678)
+        debugpy.wait_for_client()
     main()
