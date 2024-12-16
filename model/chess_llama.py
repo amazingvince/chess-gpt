@@ -24,6 +24,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
+from transformers import BertConfig, BertModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
@@ -1060,6 +1061,8 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
+        fen_input_ids: torch.LongTensor = None,
+        fen_token_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,

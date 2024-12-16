@@ -195,38 +195,39 @@ class ChessTokenizer(PreTrainedTokenizer):
     ) -> BatchEncoding:
         del kwargs  # Unused
         input_ids = []
-        fed_ids = []
+        fen_token_ids = []
+        fen_inputs = {}
         for text in batch_text_or_text_pairs:
+            tokenized_text = self._tokenize(text, fen_inputs)
             ids = self.convert_tokens_to_ids(tokenized_text["text"])
             input_ids.append((ids, None))
-            fed_tokens = self.fen_tokenizer._tokenize(tokenized_text["fen_positions"])
-            fed_ids.append(self.fen_tokenizer.convert_tokens_to_ids(fed_tokens))
-
+            fen_token_ids.append(tokenized_text["fen_token_ids"])
+        fen_input_ids = list(map(lambda x: x[1], sorted(fen_inputs.values(), key=lambda x: x[0])))
         batch_outputs = self._batch_prepare_for_model(
             input_ids,
         )
-        batch_outputs["fen_input_ids"] = fed_ids
+        batch_outputs["fen_token_ids"] = fen_token_ids
+        batch_outputs["fen_input_ids"] = list(fen_input_ids)
         return BatchEncoding(batch_outputs)
 
-    def _tokenize(self, text: str) -> List[str]:
-        def get_board_fen_index(fen_to_inputs, board):
+    def _tokenize(self, text: str, fen_inputs: dict) -> List[str]:
+        def get_board_fen_index(board):
             fen = board.fen()
-            if fen not in fen_to_inputs:
+            if fen not in fen_inputs:
                 fen_tokens = self.fen_tokenizer._tokenize(fen)
                 fed_inputs = self.fen_tokenizer.convert_tokens_to_ids(fen_tokens)
-                fen_to_inputs[fen] = (len(fen_to_inputs), fed_inputs)
-            return fen_to_inputs[fen][0]
+                fen_inputs[fen] = (len(fen_inputs), fed_inputs)
+            return fen_inputs[fen][0]
             
         # Split on special tokens and moves
         pattern = r"(<\|[^|]+\|>|[a-h][1-8][a-h][1-8][qrnb]?)"
         tokens = []
         fen_token_ids = []
         board = chess.Board()
-        fen_to_inputs: dict[str, dict[int, list[str]]] = {}
         for match in re.finditer(pattern, text):
             token = match.group()
             
-            board_pos_idx = get_board_fen_index(fen_to_inputs, board)
+            board_pos_idx = get_board_fen_index(board)
             if len(token) >= 4 and not token.startswith("<|"):  # It's a move
                 from_square = token[:2]
                 to_square = token[2:4]  # to square
@@ -240,7 +241,7 @@ class ChessTokenizer(PreTrainedTokenizer):
                     fen_token_ids.append(board_pos_idx)
                 # Update fen position
                 move = chess.Move.from_uci(from_square + to_square + promotion)
-                board_pos_idx = get_board_fen_index(fen_to_inputs, board)
+                board_pos_idx = get_board_fen_index(board)
                 board.push(move)
             else:  # Special token
                 tokens.append(token)
@@ -249,7 +250,6 @@ class ChessTokenizer(PreTrainedTokenizer):
         return {
             "text": tokens, 
             "fen_token_ids":fen_token_ids, 
-            "fen_token_map": fen_to_inputs
         }
 
     def _convert_token_to_id(self, token: str) -> int:
