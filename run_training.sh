@@ -73,7 +73,7 @@ mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
 ACCELERATE_LOG_LEVEL=info accelerate \
-    --config_file acelerate.yaml launch run_clm_old.py \
+    launch --config_file accelerate.yaml run_clm_old.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
