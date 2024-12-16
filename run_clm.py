@@ -21,7 +21,7 @@ https://huggingface.co/models?filter=text-generation
 """
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
-from model.chess_llama import ChessLlamaForCausalLM
+import json
 import logging
 import math
 import os
@@ -30,34 +30,33 @@ import warnings
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import Optional
-import json
 
 import datasets
 import evaluate
 import torch
-from datasets import load_dataset, Dataset
-
 import transformers
+from datasets import Dataset, load_dataset
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
+    DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
     default_data_collator,
     is_torch_tpu_available,
-    set_seed,
     is_torch_xla_available,
+    set_seed,
 )
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-from transformers import DataCollatorForLanguageModeling
 
+from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.37.0.dev0")
@@ -445,7 +444,8 @@ def main():
         )
     else:
         config.attn_implementation = "flash_attention_2"
-        model = ChessLlamaForCausalLM(config)
+        chess_llama_config = ChessLlamaConfig()
+        model = ChessLlamaForCausalLM(config, chess_llama_config)
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
