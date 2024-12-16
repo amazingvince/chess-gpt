@@ -8,4 +8,3 @@ uv sync --no-build-isolation
 source .venv/bin/activate
 wandb login
 huggingface-cli login
-accelerate config
