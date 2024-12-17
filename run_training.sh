@@ -8,7 +8,7 @@ export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
 # Whether to wait for a debugger to attach
-export ENABLE_DEBUGPY=0
+# export ENABLE_DEBUGPY=0
 
 # script arguments
 # cpu_cores=$(nproc)
@@ -73,7 +73,7 @@ mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
 ACCELERATE_LOG_LEVEL=info accelerate \
-    launch --config_file accelerate.yaml run_clm_old.py \
+    launch --config_file accelerate.yaml run_clm.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
