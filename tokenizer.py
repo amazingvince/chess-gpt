@@ -4,6 +4,7 @@ import re
 import chess
 from transformers.tokenization_utils import BatchEncoding
 
+
 class ChessTokenizer(PreTrainedTokenizer):
     def __init__(
         self, model_max_length: int = 2048, padding_side: str = "right", **kwargs
@@ -54,7 +55,7 @@ class ChessTokenizer(PreTrainedTokenizer):
 
     def get_vocab(self) -> Dict[str, int]:
         return self.vocab.copy()
-    
+
     def _batch_encode_plus(
         self,
         batch_text_or_text_pairs,
@@ -90,8 +91,8 @@ class ChessTokenizer(PreTrainedTokenizer):
                 to_square = token[2:4]  # to square
                 tokens.extend([from_square, to_square])
                 # Add fen position of previous move
-                fen_positions.extend(2*[board.fen()])
-                promotion = ''
+                fen_positions.extend(2 * [board.fen()])
+                promotion = ""
                 if len(token) > 4:  # promotion piece
                     promotion = token[4]
                     tokens.append(promotion)
@@ -191,3 +192,4 @@ if __name__ == "__main__":
 
     print(tokenizer.decode(batch_encoded["input_ids"][0]))
     print(tokenizer.decode(batch_encoded["input_ids"][1]))
+    print(tokenizer.vocab_size)
