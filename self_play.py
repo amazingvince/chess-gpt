@@ -16,7 +16,8 @@ from datasets import load_dataset
 import torch
 import transformers
 from transformers import AutoModelForCausalLM
-from tokenizer import ChessTokenizer  # Ensure this exists in your environment
+from tokenizer import ChessTokenizer
+from tqdm import tqdm
 
 # Suppress transformer warnings for cleaner output
 transformers.logging.set_verbosity_error()
@@ -436,7 +437,7 @@ def play_single_game(args):
 
 
 def run_parallel_games(config: ParallelGameConfig) -> Dict[int, Dict]:
-    """Run multiple games in parallel and aggregate results."""
+    """Run multiple games in parallel and aggregate results, with a progress bar."""
     os.makedirs("results", exist_ok=True)
     all_results = defaultdict(GameStats)
     tasks = [
@@ -448,21 +449,25 @@ def run_parallel_games(config: ParallelGameConfig) -> Dict[int, Dict]:
     logging.info(f"Starting parallel execution with {config.num_workers} workers.")
     start_time = time.time()
 
+    # Setup the progress bar
+    total_tasks = len(tasks)
     with ProcessPoolExecutor(max_workers=config.num_workers) as executor:
         futures = [executor.submit(play_single_game, task) for task in tasks]
+        with tqdm(total=total_tasks, desc="Running Games", unit="game") as pbar:
+            for future in as_completed(futures):
+                try:
+                    outcome = future.result()
+                    level = outcome["level"]
+                    game_result = outcome["result"]
+                    all_results[level].add_result(game_result)
+                    pbar.update(1)  # Update progress bar for each completed game
 
-        for future in as_completed(futures):
-            try:
-                outcome = future.result()
-                level = outcome["level"]
-                game_result = outcome["result"]
-                all_results[level].add_result(game_result)
-                # We do not track invalid_first_moves here because each `play_game` call
-                # updates it internally. It is serialized in add_result if needed.
-                if config.verbose:
-                    print(f"Completed game {outcome['game_num']+1} at level {level}")
-            except Exception as e:
-                logging.error(f"Error in game execution: {str(e)}")
+                    # Update the progress bar description to show elapsed time
+                    elapsed = time.time() - start_time
+                    pbar.set_postfix_str(f"Elapsed: {elapsed:.2f}s")
+                except Exception as e:
+                    logging.error(f"Error in game execution: {str(e)}")
+                    pbar.update(1)  # Still increment to keep progress accurate
 
     final_results = {}
     for level in config.stockfish_levels:
@@ -509,9 +514,9 @@ def main(config_dict: Dict):
 
 if __name__ == "__main__":
     CONFIG = {
-        "model_path": "/home/vince/code/chess-gpt/runtime/autoregressive/chess-llama-mini-v3-2048/checkpoint-5000",
+        "model_path": "/home/vince/code/chess-gpt/runtime/autoregressive/chess-llama-mini-v3-2048/checkpoint-15000",
         "stockfish_path": "/home/vince/code/chess-gpt/stockfish/stockfish/stockfish-ubuntu-x86-64-avx512",
-        "games_per_level": 10,
+        "games_per_level": 500,
         "stockfish_levels": [0, 5, 10, 15, 20],
         "stockfish_time": 1.0,
         "verbose": False,
