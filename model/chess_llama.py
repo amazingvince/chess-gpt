@@ -57,8 +57,10 @@ from custom_liger.transformers.weighted_fused_linear_cross_entropy import (
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
-_CONFIG_FOR_DOC = "LlamaConfig"
+_CONFIG_FOR_DOC = "ChessLlamaConfig"
 
+class ChessLlamaConfig(LlamaConfig):
+    model_type = "chess_llama"
 
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -92,7 +94,7 @@ class LlamaRotaryEmbedding(nn.Module):
         device=None,
         scaling_factor=1.0,
         rope_type="default",
-        config: Optional[LlamaConfig] = None,
+        config: Optional[ChessLlamaConfig] = None,
     ):
         super().__init__()
         # TODO (joao): remove the `if` below, only used for BC
@@ -235,7 +237,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: ChessLlamaConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -535,7 +537,7 @@ LLAMA_ATTENTION_CLASSES = {
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    def __init__(self, config: ChessLlamaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -624,7 +626,7 @@ LLAMA_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`LlamaConfig`]):
+        config ([`ChessLlamaConfig`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -636,7 +638,7 @@ LLAMA_START_DOCSTRING = r"""
     LLAMA_START_DOCSTRING,
 )
 class LlamaPreTrainedModel(PreTrainedModel):
-    config_class = LlamaConfig
+    config_class = ChessLlamaConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer"]
@@ -743,10 +745,10 @@ class LlamaModel(LlamaPreTrainedModel):
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
 
     Args:
-        config: LlamaConfig
+        config: ChessLlamaConfig
     """
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: ChessLlamaConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1193,6 +1195,7 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
 
         loss = None
+        logits = None
         if labels is not None:
             # Handle sample weights if provided
             if sample_weights is not None:
@@ -1207,8 +1210,8 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             lce = WeightedLigerFusedLinearCrossEntropyLoss()
             loss = lce(
                 self.lm_head.weight,
-                shift_hidden_states,
-                shift_labels,
+                shift_hidden_states.view(-1, shift_hidden_states.shape[-1]),
+                shift_labels.view(-1),
                 sample_weights=shift_weights,
             )
 

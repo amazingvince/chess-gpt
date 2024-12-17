@@ -45,13 +45,14 @@ from transformers import (
     is_torch_xla_available,
     set_seed,
 )
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
-from model.chess_llama import ChessLlamaForCausalLM
+from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.37.0.dev0")
@@ -66,6 +67,9 @@ logger = logging.getLogger(__name__)
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+AutoConfig.register("chess_llama", ChessLlamaConfig)
+AutoModelForCausalLM.register(ChessLlamaConfig, ChessLlamaForCausalLM)
 
 
 @dataclass
@@ -440,10 +444,12 @@ def main():
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
         )
     else:
-        config._attn_implementation_internal = "flash_attention_2"
-        config.trust_remote_code = model_args.trust_remote_code
-        config.torch_dtype = torch.bfloat16
-        model = ChessLlamaForCausalLM(config)
+        model = AutoModelForCausalLM.from_config(
+            config,
+            trust_remote_code=model_args.trust_remote_code,
+            attn_implementation="flash_attention_2",
+            torch_dtype=torch.bfloat16,
+        )
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
