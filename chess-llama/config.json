@@ -1,7 +1,7 @@
 {
     "_name_or_path": "amazingvince/chess-llama",
     "architectures": [
-      "LlamaForCausalLM"
+      "ChessLlamaForCausalLM"
     ],
     "attention_bias": false,
     "attention_dropout": 0.0,
@@ -12,7 +12,7 @@
     "initializer_range": 0.02,
     "intermediate_size": 4096,
     "max_position_embeddings": 1024,
-    "model_type": "llama",
+    "model_type": "chess_llama",
     "num_attention_heads": 32,
     "num_hidden_layers": 20,
     "num_key_value_heads": 8,

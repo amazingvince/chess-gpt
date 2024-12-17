@@ -22,43 +22,37 @@ https://huggingface.co/models?filter=text-generation
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
 import logging
-import math
 import os
 import sys
 import warnings
 from dataclasses import dataclass, field
-from itertools import chain
 from typing import Optional
-import json
 
 import datasets
 import evaluate
 import torch
-from datasets import load_dataset, Dataset
-
 import transformers
+from datasets import Dataset, load_dataset
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
-    AutoTokenizer,
+    DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
-    default_data_collator,
-    is_torch_tpu_available,
-    set_seed,
     is_torch_xla_available,
+    set_seed,
 )
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-from transformers import DataCollatorForLanguageModeling
 
 from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
-
+from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.37.0.dev0")
@@ -73,6 +67,9 @@ logger = logging.getLogger(__name__)
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+AutoConfig.register("chess_llama", ChessLlamaConfig)
+AutoModelForCausalLM.register(ChessLlamaConfig, ChessLlamaForCausalLM)
 
 
 @dataclass
@@ -160,8 +157,11 @@ class ModelArguments:
             )
         },
     )
+    attn_implementation: Optional[str] = field(
+        default="flash_attention_2",
+    )
     torch_dtype: Optional[str] = field(
-        default=None,
+        default="bfloat16",
         metadata={
             "help": (
                 "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
@@ -442,7 +442,6 @@ def main():
             trust_remote_code=model_args.trust_remote_code,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
-            attn_implementation="flash_attention_2",
         )
     else:
         model = AutoModelForCausalLM.from_config(
@@ -468,7 +467,6 @@ def main():
         column_names = list(raw_datasets["train"].features)
     else:
         column_names = list(raw_datasets["validation"].features)
-    text_column_name = "text" if "text" in column_names else column_names[0]
 
     # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
     tok_logger = transformers.utils.logging.get_logger(

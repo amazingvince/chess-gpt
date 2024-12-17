@@ -1,9 +1,138 @@
-from transformers import PreTrainedTokenizer
-from typing import List, Optional, Dict, Any
 import re
+from typing import Any, Dict, List, Optional
+
 import chess
+from transformers import PreTrainedTokenizer
 from transformers.tokenization_utils import BatchEncoding
 
+
+class FENTokenizer(PreTrainedTokenizer):
+    def __init__(
+        self, model_max_length: int = 2048, padding_side: str = "right", **kwargs
+    ):
+        self.special_tokens = {
+            "pad_token": "<|pad|>",
+            "unk_token": "<|unk|>",
+        }
+
+        # Build vocabulary for FEN tokens
+        vocab = {}
+        current_id = 0
+
+        # Add special tokens
+        for token in self.special_tokens.values():
+            vocab[token] = current_id
+            current_id += 1
+
+        # Add piece tokens
+        pieces = "pnbrqkPNBRQK"
+        for piece in pieces:
+            vocab[piece] = current_id
+            current_id += 1
+
+        # Add numbers 1-8 for empty squares
+        for i in range(1, 9):
+            vocab[str(i)] = current_id
+            current_id += 1
+
+        # Add FEN separators
+        vocab["/"] = current_id
+        current_id += 1
+
+        self.vocab = vocab
+        self.ids_to_tokens = {v: k for k, v in vocab.items()}
+
+        super().__init__(
+            model_max_length=model_max_length,
+            padding_side=padding_side,
+            **kwargs
+        )
+
+    def _tokenize(self, text: str) -> List[str]:
+        """
+        Converts a string into a sequence of tokens for FEN notation.
+        
+        Args:
+            text (str): The FEN string to tokenize
+            
+        Returns:
+            List[str]: List of tokens
+        """
+        # Split FEN string into individual characters/tokens
+        tokens = []
+        for char in text:
+            tokens.append(char)
+        return tokens
+
+    def _convert_token_to_id(self, token: str) -> int:
+        """
+        Converts a token to its corresponding vocabulary ID.
+        
+        Args:
+            token (str): Token to convert
+            
+        Returns:
+            int: The ID of the token in the vocabulary
+        """
+        return self.vocab.get(token, self.vocab[self.special_tokens["unk_token"]])
+
+    def _convert_id_to_token(self, index: int) -> str:
+        """
+        Converts a vocabulary ID back to its corresponding token.
+        
+        Args:
+            index (int): ID to convert
+            
+        Returns:
+            str: The token corresponding to the ID
+        """
+        return self.ids_to_tokens.get(index, self.special_tokens["unk_token"])
+
+    def get_vocab(self) -> Dict[str, int]:
+        """
+        Returns the vocabulary as a dictionary of token to index.
+        
+        Returns:
+            Dict[str, int]: The vocabulary
+        """
+        return self.vocab.copy()
+
+    @property
+    def vocab_size(self) -> int:
+        """
+        Returns the size of the vocabulary.
+        
+        Returns:
+            int: Vocabulary size
+        """
+        return len(self.vocab)
+
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
+        """
+        Saves the tokenizer vocabulary to a file.
+        
+        Args:
+            save_directory (str): Directory where to save the vocabulary
+            filename_prefix (Optional[str]): Optional prefix for the vocabulary filename
+            
+        Returns:
+            Tuple[str]: Paths to the saved vocabulary files
+        """
+        import json
+        import os
+
+        if not os.path.isdir(save_directory):
+            os.makedirs(save_directory)
+
+        vocab_file = os.path.join(
+            save_directory, 
+            (filename_prefix + "-" if filename_prefix else "") + "vocab.json"
+        )
+
+        with open(vocab_file, "w", encoding="utf-8") as f:
+            json.dump(self.vocab, f, ensure_ascii=False)
+
+        return (vocab_file,)
 
 class ChessTokenizer(PreTrainedTokenizer):
     def __init__(
@@ -16,6 +145,8 @@ class ChessTokenizer(PreTrainedTokenizer):
             "pad_token": "<|pad|>",
             "unk_token": "<|unk|>",
         }
+
+        self.fen_tokenizer = FENTokenizer(model_max_length=model_max_length, padding_side=padding_side, **kwargs)
 
         # Generate chess square tokens (a1-h8)
         files = "abcdefgh"[::-1]
@@ -63,18 +194,24 @@ class ChessTokenizer(PreTrainedTokenizer):
     ) -> BatchEncoding:
         del kwargs  # Unused
         input_ids = []
-        fen_positions = []
+        input_fen_ids = []
         for text in batch_text_or_text_pairs:
             tokenized_text = self._tokenize(text)
             ids = self.convert_tokens_to_ids(tokenized_text["text"])
             input_ids.append((ids, None))
-            fen_positions.append(tokenized_text["fen_positions"])
+            # TODO: tokenize the current fen position when we start at different move indices
+            tokenized_fen = self.fen_tokenizer._tokenize(tokenized_text["fen_positions"][0])
+            fen_ids = self.fen_tokenizer.convert_tokens_to_ids(tokenized_fen)
+            input_fen_ids.append((fen_ids, None))
 
         batch_outputs = self._batch_prepare_for_model(
             input_ids,
         )
-        batch_outputs["fen_positions"] = fen_positions
-
+        batch_fen_outputs = self.fen_tokenizer._batch_prepare_for_model(
+            input_fen_ids,
+        )
+        batch_outputs["fen_input_ids"] = batch_fen_outputs["input_ids"]
+        batch_outputs["fen_attention_mask"] = batch_fen_outputs["attention_mask"]
         return BatchEncoding(batch_outputs)
 
     def _tokenize(self, text: str) -> List[str]:
@@ -152,8 +289,8 @@ class ChessTokenizer(PreTrainedTokenizer):
     def save_vocabulary(
         self, save_directory: str, filename_prefix: Optional[str] = None
     ) -> tuple:
-        import os
         import json
+        import os
 
         if not os.path.isdir(save_directory):
             os.makedirs(save_directory)
