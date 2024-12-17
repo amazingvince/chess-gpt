@@ -153,8 +153,11 @@ class ModelArguments:
             )
         },
     )
+    attn_implementation: Optional[str] = field(
+        default="flash_attention_2",
+    )
     torch_dtype: Optional[str] = field(
-        default=None,
+        default="bfloat16",
         metadata={
             "help": (
                 "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
@@ -435,10 +438,9 @@ def main():
             trust_remote_code=model_args.trust_remote_code,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
-            attn_implementation="flash_attention_2",
         )
     else:
-        config.attn_implementation = "flash_attention_2"
+        config._attn_implementation_internal = "flash_attention_2"
         config.trust_remote_code = model_args.trust_remote_code
         config.torch_dtype = torch.bfloat16
         model = ChessLlamaForCausalLM(config)
@@ -459,7 +461,6 @@ def main():
         column_names = list(raw_datasets["train"].features)
     else:
         column_names = list(raw_datasets["validation"].features)
-    text_column_name = "text" if "text" in column_names else column_names[0]
 
     # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
     tok_logger = transformers.utils.logging.get_logger(

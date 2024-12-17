@@ -50,6 +50,10 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
+from custom_liger.transformers.weighted_fused_linear_cross_entropy import (
+    WeightedLigerFusedLinearCrossEntropyLoss,
+)
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
@@ -1097,6 +1101,7 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         fen_input_ids: torch.LongTensor | None = None,
         fen_attention_mask: torch.LongTensor | None = None,
+        sample_weights: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -1153,13 +1158,13 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             if inputs_embeds is None and input_ids is not None:
                 inputs_embeds = self.get_input_embeddings()(input_ids)
             
-            # Prepend FEN embeddings to sequence
-            inputs_embeds = torch.cat([fen_embeddings, inputs_embeds], dim=1)
+            # Prepend FEN embeddings to sequence, only take first token from FEN embedding
+            inputs_embeds = torch.cat([fen_embeddings[:, [0]], inputs_embeds], dim=1)
             
             # Adjust attention mask to account for prepended FEN tokens
             if attention_mask is not None:
                 fen_attn_mask = torch.ones(
-                    (attention_mask.shape[0], fen_embeddings.shape[1]),
+                    (attention_mask.shape[0], 1),
                     dtype=attention_mask.dtype,
                     device=attention_mask.device
                 )
@@ -1183,13 +1188,29 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        hidden_states = outputs[0]
+        # Drop fen token in output
+        hidden_states = outputs[0][:, 1:]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            # Handle sample weights if provided
+            if sample_weights is not None:
+                shift_weights = sample_weights[..., 1:].contiguous()
+                shift_weights = shift_weights.view(-1)
+            else:
+                shift_weights = None
+
+            shift_hidden_states = hidden_states[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            lce = WeightedLigerFusedLinearCrossEntropyLoss()
+            loss = lce(
+                self.lm_head.weight,
+                shift_hidden_states,
+                shift_labels,
+                sample_weights=shift_weights,
+            )
 
         if not return_dict:
             output = (logits,) + outputs[1:]

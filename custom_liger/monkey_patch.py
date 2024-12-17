@@ -4,24 +4,19 @@ from functools import partial
 from typing import Callable
 
 import transformers
-from packaging import version
-from transformers import PreTrainedModel
-
 from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 from liger_kernel.transformers.functional import liger_cross_entropy
-
-
 from liger_kernel.transformers.model.llama import lce_forward as llama_lce_forward
 from liger_kernel.transformers.model.llama import (
     lce_forward_deprecated as llama_lce_forward_deprecated,
 )
-
-
 from liger_kernel.transformers.rms_norm import LigerRMSNorm
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from liger_kernel.transformers.swiglu import (
     LigerSwiGLUMLP,
 )
+from packaging import version
+from transformers import PreTrainedModel
 
 from custom_liger.model.chess_llama import lce_forward as weighted_lce_forward
 
@@ -86,40 +81,40 @@ def apply_liger_kernel_to_chess_llama(
         <= 1
     ), "Only one of cross_entropy, fused_linear_cross_entropy, or weighted_fused_linear_cross_entropy can be True."
 
-    from transformers.models.llama import modeling_llama
-    from transformers.models.llama.modeling_llama import LlamaModel
+    from model import chess_llama
+    from model.chess_llama import LlamaModel
 
     if rope:
-        modeling_llama.apply_rotary_pos_emb = liger_rotary_pos_emb
+        chess_llama.apply_rotary_pos_emb = liger_rotary_pos_emb
     if rms_norm:
-        modeling_llama.LlamaRMSNorm = LigerRMSNorm
+        chess_llama.LlamaRMSNorm = LigerRMSNorm
     if swiglu:
-        modeling_llama.LlamaMLP = LigerSwiGLUMLP
+        chess_llama.LlamaMLP = LigerSwiGLUMLP
 
-    if cross_entropy:
-        if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-            from transformers.loss.loss_utils import nn
+    # if cross_entropy:
+    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
+    #         from transformers.loss.loss_utils import nn
 
-            nn.functional.cross_entropy = liger_cross_entropy
-        else:
-            logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-            modeling_llama.CrossEntropyLoss = LigerCrossEntropyLoss
+    #         nn.functional.cross_entropy = liger_cross_entropy
+    #     else:
+    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
+    #         chess_llama.CrossEntropyLoss = LigerCrossEntropyLoss
 
-    if fused_linear_cross_entropy:
-        if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-            modeling_llama.LlamaForCausalLM.forward = llama_lce_forward
-        else:  # if version < 4.46.1
-            logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-            modeling_llama.LlamaForCausalLM.forward = llama_lce_forward_deprecated
+    # if fused_linear_cross_entropy:
+    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
+    #         chess_llama.LlamaForCausalLM.forward = llama_lce_forward
+    #     else:  # if version < 4.46.1
+    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
+    #         chess_llama.LlamaForCausalLM.forward = llama_lce_forward_deprecated
 
-    if weighted_fused_linear_cross_entropy:
-        if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-            modeling_llama.LlamaForCausalLM.forward = weighted_lce_forward
-        else:
-            logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-            raise ValueError(
-                "Weighted Fused Linear Cross Entropy Loss is not supported for transformers versions < 4.46.1"
-            )
+    # if weighted_fused_linear_cross_entropy:
+    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
+    #         chess_llama.LlamaForCausalLM.forward = weighted_lce_forward
+    #     else:
+    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
+    #         raise ValueError(
+    #             "Weighted Fused Linear Cross Entropy Loss is not supported for transformers versions < 4.46.1"
+    #         )
 
     if model is not None:
         # The model instance already exists, so we need to additionally patch the
