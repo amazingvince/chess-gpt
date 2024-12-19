@@ -50,6 +50,7 @@ from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
+import numpy as np
 
 from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
 from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
@@ -495,14 +496,44 @@ def main():
 
         metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
 
-        def compute_metrics(eval_preds):
-            preds, labels = eval_preds
-            # preds have the same shape as the labels, after the argmax(-1) has been calculated
-            # by preprocess_logits_for_metrics but we need to shift the labels
-            labels = labels[:, 1:].reshape(-1)
-            preds = preds[:, :-1].reshape(-1)
-            return metric.compute(predictions=preds, references=labels)
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        # preds have the same shape as the labels, after the argmax(-1) has been calculated
+        # by preprocess_logits_for_metrics but we need to shift the labels
+        labels = labels[:, 1:].reshape(-1)
+        preds = preds[:, :-1].reshape(-1)
 
+        # Create a mask for tokens to exclude
+        # You can modify this list based on your needs
+        tokens_to_exclude = [
+            -100,
+            0,
+            1,
+            2,
+            3,
+            73,
+            74,
+            75,
+            76,
+        ]  # Example: excluding padding token (0) and ignored index (-100)
+        mask = ~np.isin(labels, tokens_to_exclude)
+
+        # Apply mask to both predictions and labels
+        filtered_preds = preds[mask]
+        filtered_labels = labels[mask]
+
+        # Compute metrics only on filtered tokens
+        results = metric.compute(predictions=filtered_preds, references=filtered_labels)
+
+        # Optionally, you can add more metrics here
+        # For example, you might want to track how many tokens were excluded
+        results["excluded_tokens_percentage"] = 100 * (
+            1 - len(filtered_preds) / len(preds)
+        )
+
+        return results
+
+    # model = torch.compile(model, backend="inductor")
     apply_liger_kernel_to_chess_llama(model=model)
     training_args.include_num_input_tokens_seen = True
     # Initialize our Trainer

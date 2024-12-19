@@ -1310,26 +1310,57 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 )
                 attention_mask = torch.cat([fen_attn_mask, attention_mask], dim=1)
 
-            # Set input_ids to None since we're using inputs_embeds
-            input_ids = None
+            # Update position_ids to account for the FEN token
+            if position_ids is not None:
+                fen_position_id = torch.zeros(
+                    (position_ids.shape[0], 1),
+                    dtype=position_ids.dtype,
+                    device=position_ids.device,
+                )
+                position_ids = torch.cat([fen_position_id, position_ids + 1], dim=1)
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-            **loss_kwargs,
-        )
+            # Update cache_position to account for the FEN token
+            if cache_position is not None:
+                fen_cache_pos = torch.zeros(
+                    (1,),
+                    dtype=cache_position.dtype,
+                    device=cache_position.device,
+                )
+                cache_position = torch.cat([fen_cache_pos, cache_position + 1])
+
+            outputs = self.model(
+                input_ids=None,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+                **loss_kwargs,
+            )
+
+            input_ids = None
+        else:
+            # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+                **loss_kwargs,
+            )
 
         # Drop fen token in output
-        hidden_states = outputs[0][:, 1:]
+        hidden_states = outputs[0][:, 1:] if fen_input_ids is not None else outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
 
         if self.config.pretraining_tp > 1:

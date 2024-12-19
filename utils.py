@@ -32,13 +32,13 @@ class ChessDataCollator:
     mlm: bool = False
     pad_to_multiple_of: int = 8
     return_tensors: str = "pt"
-    max_length: int = 512
+    max_length: int = 2048
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         logger.debug(f"Collating batch of size {len(features)}")
 
         # Extract FEN strings and pre-tokenize moves
-        fen_texts = [f["fen"] for f in features]
+        fen_texts = self.fen_pre_tokenize(features)
         move_texts = self.pre_tokenize(features)
         weights = [f.get("weight", 1.0) for f in features]
 
@@ -88,8 +88,8 @@ class ChessDataCollator:
         elo = features.get("average_elo", 999)
         dataset_source = features.get("dataset_source", None)
 
-        if dataset_source == "puzzles":
-            elo = 2000
+        if dataset_source == "puzzles" or dataset_source == "laion_games":
+            return "<|engine|>"
         if elo < 1000:
             return "<|below_1000|>"
         elif elo < 1999:
@@ -112,9 +112,23 @@ class ChessDataCollator:
         """
 
         return [
-            f"{ChessDataCollator.add_elo_token(f)}<|start|>{('<|turn|>'.join(f['moves']))}<|end|>"
+            f"{ChessDataCollator.add_elo_token(f)}<|start|>{('<|turn|>'.join(f['moves']))}"
             for f in features
         ]
+
+    @staticmethod
+    def fen_pre_tokenize(features: Dict[str, List]) -> List[str]:
+        """
+        Pre-tokenize move sequences by adding special tokens.
+
+        Args:
+            features: Dictionary containing "Moves" key with list of move sequences
+
+        Returns:
+            List of pre-tokenized move sequences with special tokens
+        """
+
+        return [f"[CLS]{f['fen']}[SEP]" for f in features]
 
 
 from transformers import Trainer

@@ -31,7 +31,7 @@ class ChessTokenizer(PreTrainedTokenizer):
         ranks = "12345678"
         squares = [f"{f}{r}" for f in files for r in ranks]
         promotions = ["q", "r", "b", "n"]
-        elo = ["<|below_1000|>", "<|1000_2000|>", "<|above_2000|>"]
+        elo = ["<|below_1000|>", "<|1000_2000|>", "<|above_2000|>, <|engine|>"]
 
         # Build vocabulary
         vocab = {}
@@ -511,3 +511,4 @@ if __name__ == "__main__":
     print(tokenizer.decode(batch_encoded["input_ids"][0]))
     print(tokenizer.decode(batch_encoded["input_ids"][1]))
     print(tokenizer.vocab_size)
+    tokenizer.save_vocabulary("vocab")

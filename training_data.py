@@ -53,10 +53,14 @@ class ChessDataProcessor:
         if avg_elo is None:
             return 1.0
         if avg_elo < 1000:
-            return 0.5
+            return 0.2
         if avg_elo > 2000:
-            return 2.0
-        return 0.5 + (avg_elo - 1000) * 0.001
+            return 1.5
+        # Linear interpolation between 1000 and 2000 Elo
+        # At 1000 Elo: 0.2
+        # At 2000 Elo: 1.5
+        # Range of 1.3 (1.5 - 0.2) over 1000 Elo points = 0.0013 per point
+        return 0.2 + (avg_elo - 1000) * 0.0013
 
     def _get_random_position_from_moves(
         self, moves: List[str]
@@ -139,7 +143,7 @@ class ChessDataProcessor:
         #     return None
 
         puzzle_rating = float(example.get("Rating", 1500))
-        weight = 1.0 - min(abs(puzzle_rating - 1400) / 1000.0, 0.5)
+        # weight = 1.0 - min(abs(puzzle_rating - 1400) / 1000.0, 0.5)
 
         # Puzzles are typically positions, so from_middle is False
         from_middle = False
@@ -147,7 +151,7 @@ class ChessDataProcessor:
         return ChessExample(
             fen=fen,
             moves=moves.split(),
-            weight=weight,
+            weight=2.0,
             dataset_source="puzzles",
             from_middle=from_middle,
         ).to_dict()
@@ -169,7 +173,7 @@ class ChessDataProcessor:
             fen=fen,
             moves=moves,
             average_elo=2000,
-            weight=1.5,
+            weight=2.0,
             dataset_source="laion_games",
             from_middle=from_middle,
         ).to_dict()
@@ -283,7 +287,7 @@ def get_eval_dataset(
         A tuple of (training_dataset, evaluation_dataset).
     """
     path = "amazingvince/chess_eval_set"
-    dataset = dataset.shuffle(seed=42).filter(
+    dataset = dataset.shuffle(seed=42069).filter(
         lambda x: (x["moves"] is not None or x["fen"] is not None)
     )
 
