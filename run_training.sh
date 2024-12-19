@@ -8,14 +8,14 @@ export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
 # Whether to wait for a debugger to attach
-# export ENABLE_DEBUGPY=0
+# export ENABLE_DEBUGPY=1
 
 # script arguments
 # cpu_cores=$(nproc)
 # NUM_WORKERS=$((cpu_cores - 4))
 # NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
 # NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
-NUM_WORKERS=6
+NUM_WORKERS=8
 hf_model_tag="chess-llama-mini-v3"
 MAX_SOURCE_LEN=2048
 
@@ -32,17 +32,17 @@ RUN_SEED=$RANDOM
 
 TOKENIZER_NAME="tokenizer-chess"
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1
 NUM_EPOCHS=1
 LEARNING_RATE=4e-4
 WARMUP_RATIO=100
-BATCH_SIZE=64
-EVAL_BATCH_SIZE=64
+BATCH_SIZE=128
+EVAL_BATCH_SIZE=96
 WEIGHT_DECAY=0.1
 
 # optimizer
 OPTIMIZER_ID="adamw_torch_fused" # adamw_8bit
-GC_STEPS=1
+GC_STEPS=2
 OPTIM_BETA1=0.90
 OPTIM_BETA2=0.95
 LR_SCHEDULER_TYPE="constant"
@@ -72,8 +72,8 @@ DEEPSPEED_CONFIG="deepspeed.json"
 mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
-ACCELERATE_LOG_LEVEL=info accelerate \
-    launch --config_file accelerate.yaml run_clm.py \
+#  --config_file accelerate.yaml \
+ACCELERATE_LOG_LEVEL=info accelerate launch run_clm.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
@@ -121,4 +121,6 @@ ACCELERATE_LOG_LEVEL=info accelerate \
     --block_size $MAX_SOURCE_LEN \
     --use_fast_tokenizer True \
     --trust_remote_code True  \
-    --max_steps 1000000
+    --max_steps 1000000 \
+    --dispatch_batches=False \
+    --split_batches=True
