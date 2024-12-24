@@ -66,7 +66,7 @@ class ChessDataProcessor:
             try:
                 board.push_uci(move)
                 valid_moves.append(move)
-            except:
+            except Exception:
                 break
 
         if len(valid_moves) < 2:
@@ -236,7 +236,6 @@ def make_train_dataset() -> Dataset:
             processed_datasets["puzzles"],
             processed_datasets["laion_games"],
         ],
-        # probabilities=[0.35, 0.25, 0.20, 0.20],
         probabilities=[0.45, 0.20, 0.35],
     )
 
@@ -289,3 +288,5 @@ def set_up_data() -> Tuple[Dataset, Dataset]:
 
 if __name__ == "__main__":
     train_dataset, eval_dataset = set_up_data()
+    print(list(train_dataset.take(10)))
+    print(list(eval_dataset.take(10)))

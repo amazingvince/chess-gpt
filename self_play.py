@@ -59,9 +59,7 @@ class MoveResult:
     move: Optional[str] = None
     is_resignation: bool = False
     failed_to_move: bool = False
-    first_move_invalid: bool = (
-        False  # True if the first candidate move was invalid but a subsequent was chosen.
-    )
+    first_move_invalid: bool = False  # True if the first candidate move was invalid but a subsequent was chosen.
 
 
 @dataclass

@@ -46,7 +46,6 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
 from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
 from tokenizer import ChessTokenizer, FENTokenizer
 from training_data import set_up_data
@@ -372,7 +371,6 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.
 
@@ -401,7 +399,6 @@ def main():
             logger.info(f"Overriding config: {model_args.config_overrides}")
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
-
 
     if model_args.model_name_or_path:
         torch_dtype = (
@@ -432,7 +429,6 @@ def main():
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
         )
 
-
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
     # to preprocess.
@@ -460,7 +456,6 @@ def main():
         preds = preds[:, :-1].reshape(-1)
         return metric.compute(predictions=preds, references=labels)
 
-    apply_liger_kernel_to_chess_llama(model=model)
     training_args.include_num_input_tokens_seen = True
     # Initialize our Trainer
 
