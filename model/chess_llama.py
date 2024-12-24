@@ -1192,28 +1192,9 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
         # Drop fen token in output
         hidden_states = outputs[0][:, 1:]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-
-        loss = None
-        logits = None
+        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
         if labels is not None:
-            # Handle sample weights if provided
-            if sample_weights is not None:
-                shift_weights = sample_weights[..., 1:].contiguous()
-                shift_weights = shift_weights.view(-1)
-            else:
-                shift_weights = None
-
-            shift_hidden_states = hidden_states[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-            lce = WeightedLigerFusedLinearCrossEntropyLoss()
-            loss = lce(
-                self.lm_head.weight,
-                shift_hidden_states.view(-1, shift_hidden_states.shape[-1]),
-                shift_labels.view(-1),
-                sample_weights=shift_weights,
-            )
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
         if not return_dict:
             output = (logits,) + outputs[1:]

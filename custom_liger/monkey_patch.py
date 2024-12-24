@@ -48,8 +48,8 @@ def _patch_rms_norm_module(
 def apply_liger_kernel_to_chess_llama(
     rope: bool = True,
     cross_entropy: bool = False,
-    weighted_fused_linear_cross_entropy: bool = True,
-    fused_linear_cross_entropy: bool = False,
+    weighted_fused_linear_cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
     rms_norm: bool = True,
     swiglu: bool = True,
     model: PreTrainedModel = None,
