@@ -32,20 +32,16 @@ import datasets
 import evaluate
 import torch
 import transformers
-from datasets import Dataset, load_dataset
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
     is_torch_xla_available,
     set_seed,
 )
-from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -53,6 +49,9 @@ from transformers.utils.versions import require_version
 
 from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
 from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
+from tokenizer import ChessTokenizer, FENTokenizer
+from training_data import set_up_data
+from utils import ChessDataCollator, ChessModelTrainer
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.37.0.dev0")
@@ -374,24 +373,6 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
-    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
-    #
-    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
-    # 'text' is found. You can easily tweak this behavior (see below).
-    #
-    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
-    # download the dataset.
-    if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-            streaming=data_args.streaming,
-        )
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.
@@ -422,9 +403,6 @@ def main():
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
 
-    from tokenizer import ChessTokenizer
-
-    tokenizer = ChessTokenizer()
 
     if model_args.model_name_or_path:
         torch_dtype = (
@@ -455,86 +433,6 @@ def main():
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
         )
 
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
-
-    # Preprocessing the datasets.
-    # First we tokenize all the texts.
-    if training_args.do_train:
-        column_names = list(raw_datasets["train"].features)
-    else:
-        column_names = list(raw_datasets["validation"].features)
-
-    # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
-    tok_logger = transformers.utils.logging.get_logger(
-        "transformers.tokenization_utils_base"
-    )
-
-    def pre_tokenize(examples):
-
-        l = []
-        MOVES = examples["Moves"]
-
-        for i in range(len(MOVES)):
-            turns = "<|turn|>".join(MOVES[i])
-            l.append(f"<|start|>{turns}<|end|>")
-        return l
-
-    def tokenize_function(examples):
-        with CaptureLogger(tok_logger) as cl:
-
-            output = tokenizer(pre_tokenize(examples))
-        # clm input could be much much longer than block_size
-        if "Token indices sequence length is longer than the" in cl.out:
-            tok_logger.warning(
-                "^^^^^^^^^^^^^^^^ Please ignore the warning above - this long input will be chunked into smaller bits"
-                " before being passed to the model."
-            )
-        return output
-
-    with training_args.main_process_first(desc="dataset map tokenization"):
-        if not data_args.streaming:
-            tokenized_datasets = raw_datasets.map(
-                tokenize_function,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=column_names,
-                load_from_cache_file=not data_args.overwrite_cache,
-                desc="Running tokenizer on dataset",
-            )
-        else:
-            tokenized_datasets = raw_datasets.map(
-                tokenize_function,
-                batched=True,
-                remove_columns=column_names,
-            )
-    if hasattr(config, "max_position_embeddings"):
-        max_pos_embeddings = config.max_position_embeddings
-    else:
-        # Define a default value if the attribute is missing in the config.
-        max_pos_embeddings = 2048
-
-    if data_args.block_size is None:
-        block_size = tokenizer.model_max_length
-        if block_size > max_pos_embeddings:
-            logger.warning(
-                f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
-                f"Using block_size={min(1024, max_pos_embeddings)} instead. You can change that default value by passing --block_size xxx."
-            )
-            if max_pos_embeddings > 0:
-                block_size = min(1024, max_pos_embeddings)
-            else:
-                block_size = 1024
-    else:
-        if data_args.block_size > tokenizer.model_max_length:
-            logger.warning(
-                f"The block_size passed ({data_args.block_size}) is larger than the maximum length for the model "
-                f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
-            )
-        block_size = min(data_args.block_size, tokenizer.model_max_length)
 
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
@@ -543,49 +441,46 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/process#map
 
-    if training_args.do_eval:
-        # Take first 1000 samples for eval
-        eval_dataset = tokenized_datasets["train"].take(1000)
-        eval_dataset = Dataset.from_list(list(eval_dataset))
+    # Initialize train and eval datasets
+    train_dataset, eval_dataset = set_up_data()
 
-        def preprocess_logits_for_metrics(logits, labels):
-            if isinstance(logits, tuple):
-                # Depending on the model and config, logits may contain extra tensors,
-                # like past_key_values, but logits always come first
-                logits = logits[0]
-            return logits.argmax(dim=-1)
+    def preprocess_logits_for_metrics(logits, labels):
+        if isinstance(logits, tuple):
+            # Depending on the model and config, logits may contain extra tensors,
+            # like past_key_values, but logits always come first
+            logits = logits[0]
+        return logits.argmax(dim=-1)
 
-        metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
+    metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
 
-        def compute_metrics(eval_preds):
-            preds, labels = eval_preds
-            # preds have the same shape as the labels, after the argmax(-1) has been calculated
-            # by preprocess_logits_for_metrics but we need to shift the labels
-            labels = labels[:, 1:].reshape(-1)
-            preds = preds[:, :-1].reshape(-1)
-            return metric.compute(predictions=preds, references=labels)
-
-    if training_args.do_train:
-        if "train" not in tokenized_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        # Skip first 1000 samples to use for eval
-        train_dataset = tokenized_datasets["train"].skip(1000)
-        if data_args.max_train_samples is not None:
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        # preds have the same shape as the labels, after the argmax(-1) has been calculated
+        # by preprocess_logits_for_metrics but we need to shift the labels
+        labels = labels[:, 1:].reshape(-1)
+        preds = preds[:, :-1].reshape(-1)
+        return metric.compute(predictions=preds, references=labels)
 
     apply_liger_kernel_to_chess_llama(model=model)
     training_args.include_num_input_tokens_seen = True
     # Initialize our Trainer
 
-    trainer = Trainer(
+    fen_tokenizer = FENTokenizer()
+    move_tokenizer = ChessTokenizer()
+
+    data_collator = ChessDataCollator(
+        move_tokenizer=move_tokenizer,
+        fen_tokenizer=fen_tokenizer,
+        mlm=False,
+        max_length=2048,
+    )
+
+    trainer = ChessModelTrainer(
         model=model,
         args=training_args,
+        data_collator=data_collator,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         compute_metrics=(
             compute_metrics
             if training_args.do_eval and not is_torch_xla_available()

@@ -1,12 +1,11 @@
 import io
 import random
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Tuple
 
 import chess
 import chess.pgn
-
-from datasets import load_dataset, Dataset, interleave_datasets
+from datasets import Dataset, interleave_datasets, load_dataset
 
 
 @dataclass
@@ -105,30 +104,6 @@ class ChessDataProcessor:
             dataset_source="lichess_games",
             from_middle=from_middle,
         ).to_dict()
-
-    # def process_lichess_eval(self, example: Dict) -> Optional[Dict]:
-    #     fen = example.get("fen")
-    #     line = example.get("line")
-
-    #     # Drop sample if fen or line is missing
-    #     if fen is None or line is None or not line.strip():
-    #         return None
-
-    #     eval_score = example.get("score", 0)
-    #     is_mate = example.get("is_mate", False)
-    #     depth = example.get("depth", 1)
-
-    #     # For evals, no mid-game probability selection (already a single FEN)
-    #     from_middle = False
-
-    #     return ChessExample(
-    #         fen=fen,
-    #         moves=line.split(),
-    #         eval_score=self._normalize_eval_score(eval_score, is_mate),
-    #         weight=min(depth / 30.0, 1.0),
-    #         dataset_source="lichess_evals",
-    #         from_middle=from_middle,
-    #     ).to_dict()
 
     def process_puzzle(self, example: Dict) -> Optional[Dict]:
         fen = example.get("FEN", None)
@@ -314,5 +289,3 @@ def set_up_data() -> Tuple[Dataset, Dataset]:
 
 if __name__ == "__main__":
     train_dataset, eval_dataset = set_up_data()
-    # print(list(train_dataset.take(10)))
-    # print(list(eval_dataset.take(10)))
