@@ -1,7 +1,9 @@
 import torch
 import triton
 
-from custom_liger.ops.weighted_liger_cross_entropy import liger_cross_entropy_kernel
+from chess_gpt.custom_liger.ops.weighted_liger_cross_entropy import (
+    liger_cross_entropy_kernel,
+)
 from liger_kernel.ops.utils import (
     amp_custom_bwd,
     amp_custom_fwd,

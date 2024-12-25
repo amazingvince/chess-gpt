@@ -31,7 +31,7 @@ class ChessTokenizer(PreTrainedTokenizer):
         ranks = "12345678"
         squares = [f"{f}{r}" for f in files for r in ranks]
         promotions = ["q", "r", "b", "n"]
-        elo = ["<|below_1000|>", "<|1000_2000|>", "<|above_2000|>, <|engine|>"]
+        elo = ["<|below_1000|>", "<|1000_2000|>", "<|above_2000|>", "<|engine|>"]
 
         # Build vocabulary
         vocab = {}
@@ -167,11 +167,11 @@ class FENTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         vocab_file=None,
-        unk_token="[UNK]",
-        sep_token="[SEP]",
-        pad_token="[PAD]",
-        cls_token="[CLS]",
-        mask_token="[MASK]",
+        unk_token="[UNK]",  # 0
+        sep_token="[SEP]",  # 1
+        pad_token="[PAD]",  # 2
+        cls_token="[CLS]",  # 3
+        mask_token="[MASK]",  # 4
         **kwargs,
     ):
         # Start with special tokens
@@ -463,7 +463,7 @@ if __name__ == "__main__":
     tokenizer = FENTokenizer()
 
     # Example FEN:
-    fen = "3q1rk1/1Q1b1ppp/p4b2/8/5B2/4P3/PPr1BPPP/3R1RK1 w - - 1 17"
+    fen = "[CLS]3q1rk1/1Q1b1ppp/p4b2/8/5B2/4P3/PPr1BPPP/3R1RK1 w - - 1 17[SEP]"
     # Encode with special tokens:
     encoded = tokenizer(fen, return_tensors="pt", add_special_tokens=True)
     print("Encoded:", encoded)
@@ -474,8 +474,8 @@ if __name__ == "__main__":
 
     # Another example with different FENs in batch:
     fens = [
-        "r3k2r/pp1q1ppp/3b1n2/2p1N3/3P4/4P3/PP3PPP/R1BQ1RK1 b kq - 3 12",
-        "7k/R7/6K1/8/8/8/8/8 b - - 44 113",
+        "[CLS]r3k2r/pp1q1ppp/3b1n2/2p1N3/3P4/4P3/PP3PPP/R1BQ1RK1 b kq - 3 12[SEP]",
+        "[CLS]7k/R7/6K1/8/8/8/8/8 b - - 44 113[SEP]",
     ]
     batch_encoded = tokenizer(
         fens, padding=True, return_tensors="pt", add_special_tokens=True
@@ -500,6 +500,7 @@ if __name__ == "__main__":
     games = [
         "<|above_2000|><|start|>e2e4<|turn|>e7e5<|turn|>d7d8q<|end|>",
         "<|1000_2000|><|start|>d2d4<|turn|>d7d5<|end|>",
+        "<|engine|><|start|>d2d4<|turn|>d7d5<|end|>",
     ]
     batch_encoded = tokenizer(games, padding=True, return_tensors="pt")
     print("\nBatch encode:", batch_encoded["input_ids"])
@@ -510,5 +511,7 @@ if __name__ == "__main__":
 
     print(tokenizer.decode(batch_encoded["input_ids"][0]))
     print(tokenizer.decode(batch_encoded["input_ids"][1]))
+    print(tokenizer.decode(batch_encoded["input_ids"][2]))
+    print(batch_encoded["attention_mask"][2])
     print(tokenizer.vocab_size)
-    tokenizer.save_vocabulary("vocab")
+    # tokenizer.save_vocabulary("vocab")

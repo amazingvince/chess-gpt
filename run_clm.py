@@ -1,26 +1,5 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2020 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Fine-tuning the library models for causal language modeling (GPT, GPT-2, CTRL, ...) on a text file or a dataset.
-
-Here is the full list of checkpoints on the hub that can be fine-tuned by this script:
-https://huggingface.co/models?filter=text-generation
-"""
-# You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
-
 import logging
 import os
 import sys
@@ -32,29 +11,30 @@ import datasets
 import evaluate
 import torch
 import transformers
-from datasets import Dataset, load_dataset
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
     is_torch_xla_available,
     set_seed,
 )
-from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.testing_utils import CaptureLogger
+
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, send_example_telemetry
+
 from transformers.utils.versions import require_version
 import numpy as np
 
-from custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
-from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
-from tokenizer_2 import ChessTokenizer, FENTokenizer
+from chess_gpt.custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
+from chess_gpt.model.chess_llama_2 import ChessLlamaConfig, ChessLlamaForCausalLM
+from chess_gpt.tokenizer import ChessTokenizer, FENTokenizer
+from chess_gpt.utils import ChessModelTrainer, ChessDataCollator
+from chess_gpt.data_loader import make_training_and_eval_datasets
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 logger = logging.getLogger(__name__)
@@ -363,11 +343,6 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # Get the datasets:
-    from training_data import set_up_data
-
-    train_dataset, eval_dataset = set_up_data()
-
     # Load pretrained model and tokenizer
     config_kwargs = {
         "cache_dir": model_args.cache_dir,
@@ -426,65 +401,6 @@ def main():
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
 
-    # Preprocessing the datasets.
-    # First we tokenize all the texts.
-    # if training_args.do_train:
-    #     column_names = list(train_dataset.features)
-    # else:
-    #     column_names = list(eval_dataset.features)
-
-    # # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
-    # tok_logger = transformers.utils.logging.get_logger(
-    #     "transformers.tokenization_utils_base"
-    # )
-
-    # def pre_tokenize(examples):
-
-    #     l = []
-    #     MOVES = examples["Moves"]
-
-    #     for i in range(len(MOVES)):
-    #         turns = "<|turn|>".join(MOVES[i])
-    #         l.append(f"<|start|>{turns}<|end|>")
-    #     return l
-
-    # def tokenize_function(examples):
-    #     with CaptureLogger(tok_logger) as cl:
-
-    #         output = tokenizer(pre_tokenize(examples))
-    #     # clm input could be much much longer than block_size
-    #     if "Token indices sequence length is longer than the" in cl.out:
-    #         tok_logger.warning(
-    #             "^^^^^^^^^^^^^^^^ Please ignore the warning above - this long input will be chunked into smaller bits"
-    #             " before being passed to the model."
-    #         )
-    #     return output
-
-    # with training_args.main_process_first(desc="dataset map tokenization"):
-    #     if not data_args.streaming:
-    #         tokenized_datasets = train_dataset.map(
-    #             tokenize_function,
-    #             batched=True,
-    #             num_proc=data_args.preprocessing_num_workers,
-    #             remove_columns=column_names,
-    #             load_from_cache_file=not data_args.overwrite_cache,
-    #             desc="Running tokenizer on dataset",
-    #         )
-    #     else:
-    #         tokenized_datasets = train_dataset.map(
-    #             tokenize_function,
-    #             batched=True,
-    #             remove_columns=column_names,
-    #         )
-
-    # if training_args.do_train:
-    #     if "train" not in train_dataset:
-    #         raise ValueError("--do_train requires a train dataset")
-    #     # Skip first 1000 samples to use for eval
-    #     if data_args.max_train_samples is not None:
-    #         max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-    #         train_dataset = train_dataset.select(range(max_train_samples))
-
     if training_args.do_eval:
 
         def preprocess_logits_for_metrics(logits, labels):
@@ -536,22 +452,57 @@ def main():
     # model = torch.compile(model, backend="inductor")
     apply_liger_kernel_to_chess_llama(model=model)
     training_args.include_num_input_tokens_seen = True
+    training_args.ddp_find_unused_parameters = False
     # Initialize our Trainer
-
-    from utils import ChessDataCollator
 
     fen_tokenizer = FENTokenizer()
     move_tokenizer = ChessTokenizer()
 
-    # Create data collator
-    data_collator = ChessDataCollator(
-        move_tokenizer=move_tokenizer,
-        fen_tokenizer=fen_tokenizer,
-        mlm=False,
-        max_length=2048,
-    )
+    def training_phase(model, phase):
+        if phase == "ecoder":
+            config = {"lichess_games": 0.40, "puzzles": 0.30, "laion_games": 0.30}
+            train_dataset, eval_dataset = make_training_and_eval_datasets(
+                config, mid_game_prob=0.7
+            )
+            data_collator = ChessDataCollator(
+                move_tokenizer=move_tokenizer,
+                fen_tokenizer=fen_tokenizer,
+                mlm=False,
+                include_fen=True,
+                max_length=2048,
+            )
+            model.freeze_decoder()
 
-    from utils import ChessModelTrainer
+        elif phase == "decoder":
+            config = {"lichess_games": 0.50, "laion_games": 0.50}
+            train_dataset, eval_dataset = make_training_and_eval_datasets(
+                config, mid_game_prob=0.0
+            )
+
+            data_collator = ChessDataCollator(
+                move_tokenizer=move_tokenizer,
+                fen_tokenizer=fen_tokenizer,
+                mlm=False,
+                include_fen=False,
+                max_length=2048,
+            )
+            model.freeze_encoder()
+        else:
+            config = {"lichess_games": 0.40, "puzzles": 0.30, "laion_games": 0.30}
+            train_dataset, eval_dataset = make_training_and_eval_datasets(
+                config, mid_game_prob=0.7
+            )
+            data_collator = ChessDataCollator(
+                move_tokenizer=move_tokenizer,
+                fen_tokenizer=fen_tokenizer,
+                mlm=False,
+                include_fen=True,
+                max_length=2048,
+            )
+
+        return train_dataset, eval_dataset, data_collator, model
+
+    train_dataset, eval_dataset, data_collator, model = training_phase(model, "full")
 
     # Initialize trainer
     trainer = ChessModelTrainer(
@@ -570,6 +521,7 @@ def main():
             if training_args.do_eval and not is_torch_xla_available()
             else None
         ),
+        # optimizers=create_scheduler(create_optimizer_with_muon(model, training_args)),
     )
 
     # Training

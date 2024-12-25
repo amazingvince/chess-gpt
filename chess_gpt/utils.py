@@ -9,6 +9,8 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import EvalPrediction
 from tqdm import tqdm
 
+import chess
+
 
 from dataclasses import dataclass
 from typing import List, Dict, Any
@@ -16,8 +18,16 @@ from transformers import PreTrainedTokenizerBase
 import torch
 import logging
 
+from chess_gpt.tokenizer import ChessTokenizer, FENTokenizer
+from transformers import Trainer
+from typing import Optional, Dict, Union, Any, Tuple, List
+from torch.utils.data import DataLoader, Dataset
+import torch
+from transformers.trainer_utils import seed_worker
+import logging
+
+
 logger = logging.getLogger(__name__)
-from tokenizer_2 import ChessTokenizer, FENTokenizer
 
 
 @dataclass
@@ -29,6 +39,7 @@ class ChessDataCollator:
 
     move_tokenizer: ChessTokenizer
     fen_tokenizer: FENTokenizer
+    include_fen: bool = False  # New parameter to control FEN inclusion
     mlm: bool = False
     pad_to_multiple_of: int = 8
     return_tensors: str = "pt"
@@ -38,19 +49,8 @@ class ChessDataCollator:
         logger.debug(f"Collating batch of size {len(features)}")
 
         # Extract FEN strings and pre-tokenize moves
-        fen_texts = self.fen_pre_tokenize(features)
         move_texts = self.pre_tokenize(features)
         weights = [f.get("weight", 1.0) for f in features]
-
-        # Tokenize FEN sequences
-        fen_encodings = self.fen_tokenizer(
-            fen_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors=self.return_tensors,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-        )
 
         # Tokenize move sequences
         move_encodings = self.move_tokenizer(
@@ -70,15 +70,31 @@ class ChessDataCollator:
         labels = torch.roll(labels, -1, dims=1)
         labels[:, -1] = -100  # Mask last token
 
-        # Create final batch
+        # Create base batch
         batch = {
             "input_ids": move_encodings["input_ids"],
             "attention_mask": move_encodings["attention_mask"],
-            "fen_input_ids": fen_encodings["input_ids"],
-            "fen_attention_mask": fen_encodings["attention_mask"],
             "labels": labels,
             "sample_weights": weight_tensor,
         }
+
+        # Optionally include FEN encodings
+        if self.include_fen:
+            fen_texts = self.fen_pre_tokenize(features)
+            fen_encodings = self.fen_tokenizer(
+                fen_texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors=self.return_tensors,
+                pad_to_multiple_of=self.pad_to_multiple_of,
+            )
+            batch.update(
+                {
+                    "fen_input_ids": fen_encodings["input_ids"],
+                    "fen_attention_mask": fen_encodings["attention_mask"],
+                }
+            )
 
         logger.debug(f"Batch shapes: {[(k, v.shape) for k, v in batch.items()]}")
         return batch
@@ -95,9 +111,7 @@ class ChessDataCollator:
         elif elo < 1999:
             return "<|1000_2000|>"
         else:
-            "<|above_2000|>"
-
-        return
+            return "<|above_2000|>"
 
     @staticmethod
     def pre_tokenize(features: Dict[str, List]) -> List[str]:
@@ -110,11 +124,28 @@ class ChessDataCollator:
         Returns:
             List of pre-tokenized move sequences with special tokens
         """
-
         return [
-            f"{ChessDataCollator.add_elo_token(f)}<|start|>{('<|turn|>'.join(f['moves']))}"
+            f"{ChessDataCollator.add_elo_token(f)}<|start|>{('<|turn|>'.join(f['moves']))}{ ChessDataCollator.add_eos_token(f) or '<|turn|>'}"
             for f in features
         ]
+
+    @staticmethod
+    def add_eos_token(feature):
+        # Create a board from the starting FEN
+        board = chess.Board(feature["fen"])
+
+        # Try to play through all moves
+        try:
+            for move in feature["moves"]:
+                board.push_uci(move)
+
+            # If game is finished (checkmate, stalemate, etc.), add EOS token
+            if board.is_game_over():
+                return "<|end|>"
+
+        except ValueError:
+            # Handle invalid moves by not adding EOS token
+            return None
 
     @staticmethod
     def fen_pre_tokenize(features: Dict[str, List]) -> List[str]:
@@ -127,18 +158,7 @@ class ChessDataCollator:
         Returns:
             List of pre-tokenized move sequences with special tokens
         """
-
         return [f"[CLS]{f['fen']}[SEP]" for f in features]
-
-
-from transformers import Trainer
-from typing import Optional, Dict, Union, Any, Tuple, List
-from torch.utils.data import DataLoader, Dataset
-import torch
-from transformers.trainer_utils import seed_worker
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class ChessModelTrainer(Trainer):
@@ -209,9 +229,9 @@ class ChessModelTrainer(Trainer):
         dataloader_params = {
             "batch_size": self.args.eval_batch_size,
             "collate_fn": data_collator,
-            "num_workers": self.args.dataloader_num_workers,
+            "num_workers": 2,
             "pin_memory": self.args.dataloader_pin_memory,
-            "persistent_workers": self.args.dataloader_persistent_workers,
+            "persistent_workers": True,
         }
 
         if not isinstance(eval_dataset, torch.utils.data.IterableDataset):

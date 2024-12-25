@@ -10,14 +10,24 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Set multiprocessing start method to 'spawn'
+if __name__ == "__main__":
+    mp.set_start_method("spawn")
+
 import chess
 import chess.engine
 from datasets import load_dataset
 import torch
 import transformers
-from transformers import AutoModelForCausalLM
-from tokenizer import ChessTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    MODEL_FOR_CAUSAL_LM_MAPPING,
+    AutoConfig,
+)
+from chess_gpt.tokenizer import ChessTokenizer, FENTokenizer
+from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
 from tqdm import tqdm
+import traceback
 
 # Suppress transformer warnings for cleaner output
 transformers.logging.set_verbosity_error()
@@ -26,6 +36,13 @@ transformers.logging.set_verbosity_error()
 logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s"
 )
+
+
+MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
+MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+AutoConfig.register("chess_llama", ChessLlamaConfig)
+AutoModelForCausalLM.register(ChessLlamaConfig, ChessLlamaForCausalLM)
 
 
 @dataclass
@@ -156,18 +173,27 @@ class GameStats:
 
 
 class ChessModel:
-    """A wrapper class around a chess-oriented language model."""
-
     def __init__(self, model_path: str, gen_params: Optional[Dict] = None):
-        self.tokenizer = ChessTokenizer()
+        self.move_tokenizer = ChessTokenizer()
+        self.fen_tokenizer = FENTokenizer()
+
+        # Modified device handling
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map="auto", torch_dtype=torch.bfloat16, use_cache=True
+            model_path,
+            device_map="cuda:0" if torch.cuda.is_available() else None,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            use_cache=False,
         )
+
+        if not torch.cuda.is_available():
+            self.model.to(self.device)
+
         self.model.eval()
         self.gen_params = gen_params or {
-            "bos_token_id": self.tokenizer.bos_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "pad_token_id": self.tokenizer.eos_token_id,
+            "bos_token_id": self.move_tokenizer.bos_token_id,
+            "eos_token_id": self.move_tokenizer.eos_token_id,
+            "pad_token_id": self.move_tokenizer.eos_token_id,
             "num_beam_groups": 5,
             "diversity_penalty": 1.0,
             "num_return_sequences": 5,
@@ -180,24 +206,51 @@ class ChessModel:
         self, board: chess.Board, game_state: Optional[str] = None
     ) -> MoveResult:
         """Generate the next move from the model given the current board state."""
-        if game_state is None:
-            game_state = self._build_game_state(board)
+        # Get both FEN and game state
+        fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        game_state = self._build_game_state(board) if game_state is None else game_state
 
-        inputs = self.tokenizer(
-            game_state, return_tensors="pt", return_token_type_ids=False
-        ).to(self.model.device)
-        outputs = self.model.generate(**self.gen_params, **inputs)
+        # Tokenize both inputs
+        fen_encodings = self.fen_tokenizer(
+            fen,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+            pad_to_multiple_of=8,
+        ).to(self.device)
 
+        move_encodings = self.move_tokenizer(
+            game_state,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+            pad_to_multiple_of=8,
+        ).to(self.device)
+
+        # Combine inputs for the model
+        model_inputs = {
+            "input_ids": move_encodings["input_ids"],
+            "attention_mask": move_encodings["attention_mask"],
+            "fen_input_ids": fen_encodings["input_ids"],
+            "fen_attention_mask": fen_encodings["attention_mask"],
+            **self.gen_params,
+        }
+
+        # Generate move
+        outputs = self.model.generate(**model_inputs)
+
+        # Process outputs to find valid move
         chosen_move = None
         first_move_invalid = False
         for i, output in enumerate(outputs):
-            decoded = self.tokenizer.decode(
-                output[len(inputs["input_ids"][0]) :], skip_special_tokens=False
+            decoded = self.move_tokenizer.decode(
+                output[len(move_encodings["input_ids"][0]) :], skip_special_tokens=False
             )
             move = self._parse_move(decoded)
             if move and self._is_legal_move(move, board):
                 chosen_move = move
-                # If i > 0, that means the first candidate was invalid and we had to choose a later one
                 if i > 0:
                     first_move_invalid = True
                 break
@@ -207,19 +260,27 @@ class ChessModel:
 
         return MoveResult(failed_to_move=True)
 
-    def _build_game_state(self, board: chess.Board) -> str:
-        """Build the game state string from the board's move stack."""
-        moves = ["<|start|>"]
+    def _build_game_state(self, board: chess.Board) -> Tuple[str, str]:
+        """Build both the FEN string and game state string from the board."""
+        # Get current FEN
+
+        # Build move history
+        moves = ["<|above_2000|><|start|>"]
         for move in board.move_stack:
             moves.append(move.uci())
             moves.append("<|turn|>")
+
         return "".join(moves)
 
     def _parse_move(self, decoded_output: str) -> Optional[str]:
         """Attempt to parse a UCI move from the model's raw output."""
         try:
             parts = decoded_output.split("<|turn|>")[0]
-            move = parts.replace("<|start|>", "").replace("<|end|>", "").strip()
+            move = (
+                parts.replace("<|above_2000|><|start|>", "")
+                .replace("<|end|>", "")
+                .strip()
+            )
             return "".join(move.split()) if len(move) >= 4 else None
         except Exception:
             return None
@@ -230,6 +291,7 @@ class ChessModel:
             chess_move = chess.Move.from_uci(move)
             return chess_move in board.legal_moves
         except Exception:
+            print(f"Failed to parse move: {move}")
             return False
 
 
@@ -419,13 +481,15 @@ def play_single_game(args):
     """Function to run a single game in parallel."""
     level, config, game_num = args
 
-    # Initialize fresh instances for this process
+    # Set device for this process
+    if torch.cuda.is_available():
+        torch.cuda.set_device(game_num % torch.cuda.device_count())
+
     game_manager = ChessGameManager(
         config.model_path, config.stockfish_path, config.stockfish_time, config.verbose
     )
 
     stats = GameStats()
-
     color_choice = {
         "random": lambda: random.choice([True, False]),
         "white": lambda: True,
@@ -466,6 +530,10 @@ def run_parallel_games(config: ParallelGameConfig) -> Dict[int, Dict]:
                     elapsed = time.time() - start_time
                     pbar.set_postfix_str(f"Elapsed: {elapsed:.2f}s")
                 except Exception as e:
+                    # log the stack trace and continue
+                    logging.error(
+                        f"Error in game execution: {str(e)}\n{traceback.format_exc()}"
+                    )
                     logging.error(f"Error in game execution: {str(e)}")
                     pbar.update(1)  # Still increment to keep progress accurate
 
@@ -496,6 +564,10 @@ def run_parallel_games(config: ParallelGameConfig) -> Dict[int, Dict]:
 
 def main(config_dict: Dict):
     """Main entry point for running multiple games against different Stockfish levels."""
+    # Ensure we're using 'spawn' method
+    if mp.get_start_method(allow_none=True) != "spawn":
+        mp.set_start_method("spawn")
+
     config = ParallelGameConfig(
         model_path=config_dict["model_path"],
         stockfish_path=config_dict["stockfish_path"],
@@ -504,7 +576,7 @@ def main(config_dict: Dict):
         stockfish_time=config_dict["stockfish_time"],
         verbose=config_dict["verbose"],
         color_strategy=config_dict["color_strategy"],
-        num_workers=config_dict.get("num_workers", mp.cpu_count()),
+        num_workers=min(config_dict.get("num_workers", mp.cpu_count()), mp.cpu_count()),
     )
 
     results = run_parallel_games(config)
@@ -514,13 +586,13 @@ def main(config_dict: Dict):
 
 if __name__ == "__main__":
     CONFIG = {
-        "model_path": "/home/vince/code/chess-gpt/runtime/autoregressive/chess-llama-mini-v3-2048/checkpoint-15000",
+        "model_path": "/home/vince/code/chess-gpt/runtime/autoregressive/chess-llama-mini-v3-2048/checkpoint-6000",
         "stockfish_path": "/home/vince/code/chess-gpt/stockfish/stockfish/stockfish-ubuntu-x86-64-avx512",
-        "games_per_level": 500,
+        "games_per_level": 10,
         "stockfish_levels": [0, 5, 10, 15, 20],
         "stockfish_time": 1.0,
         "verbose": False,
         "color_strategy": "random",
-        "num_workers": 16,
+        "num_workers": 1,
     }
     main(CONFIG)

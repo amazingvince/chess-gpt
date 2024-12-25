@@ -24,8 +24,8 @@ from transformers import (
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
 )
-from tokenizer_2 import ChessTokenizer, FENTokenizer
-from model.chess_llama import ChessLlamaConfig, ChessLlamaForCausalLM
+from chess_gpt.tokenizer import ChessTokenizer, FENTokenizer
+from chess_gpt.model.chess_llama_2 import ChessLlamaConfig, ChessLlamaForCausalLM
 from tqdm import tqdm
 import traceback
 
@@ -45,14 +45,38 @@ AutoConfig.register("chess_llama", ChessLlamaConfig)
 AutoModelForCausalLM.register(ChessLlamaConfig, ChessLlamaForCausalLM)
 
 
-def main():
+def test_pretrained_model():
     model = AutoModelForCausalLM.from_pretrained(
-        "amazingvince/chess-llama-mini-v3-2048",
+        # "amazingvince/chess-llama-mini-v3-2048",
+        "/home/vince/code/chess-gpt/runtime/autoregressive/chess-llama-decoder-2048/checkpoint-2000",
         device_map="cuda:0",
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        use_cache=False,
+        # use_cache=False,
     )
+    return model
+
+
+# def test_from_config():
+#     config = AutoConfig.from_pretrained(
+#         "/home/vince/code/chess-gpt/chess-llama/config.json",
+#     )
+#     config.torch_dtype = torch.bfloat16
+#     config.use_cache = False
+
+#     model = AutoModelForCausalLM.from_config(
+#         config=config,
+#     )
+#     model.train()
+#     # Add these lines
+#     model = model.to("cuda:0")
+#     # model.config._attn_implementation = "flash_attention_2"
+#     return model
+
+
+def main():
+    model = test_pretrained_model()
+    # model = test_from_config()
 
     move_tokenizer = ChessTokenizer()
     fen_tokenizer = FENTokenizer()
@@ -60,7 +84,7 @@ def main():
     gen_params = {
         "bos_token_id": move_tokenizer.bos_token_id,
         "eos_token_id": move_tokenizer.eos_token_id,
-        "pad_token_id": move_tokenizer.eos_token_id,
+        "pad_token_id": move_tokenizer.pad_token_id,
         "num_beam_groups": 5,
         "diversity_penalty": 1.0,
         "num_return_sequences": 5,
@@ -68,9 +92,9 @@ def main():
         "num_beams": 10,
     }
 
-    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    fen = "[CLS]rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1[SEP]"
 
-    moves = "<|above_2000|><|start|>e2e4<|turn|>e7e5<|turn|>"
+    moves = "<|engine|><|start|>e2e4<|turn|>"
     move_encodings = move_tokenizer(moves, return_tensors="pt").to(model.device)
     fen_encodings = fen_tokenizer(fen, return_tensors="pt").to(model.device)
 
@@ -81,8 +105,12 @@ def main():
         "fen_attention_mask": fen_encodings["attention_mask"],
         **gen_params,
     }
+    print(model)
 
+    model.eval()
+    # model.forward(**model_inputs)
     outputs = model.generate(**model_inputs)
+    # print(f"Output: {move_tokenizer.decode(outputs[0])}")
 
     for i, output in enumerate(outputs):
         print(f"Output {i + 1}: {move_tokenizer.decode(output)}")

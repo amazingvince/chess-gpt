@@ -1,15 +1,9 @@
-import inspect
 import logging
-from functools import partial
+
 from typing import Callable
 
 import transformers
-from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
-from liger_kernel.transformers.functional import liger_cross_entropy
-from liger_kernel.transformers.model.llama import lce_forward as llama_lce_forward
-from liger_kernel.transformers.model.llama import (
-    lce_forward_deprecated as llama_lce_forward_deprecated,
-)
+
 from liger_kernel.transformers.rms_norm import LigerRMSNorm
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from liger_kernel.transformers.swiglu import (
@@ -18,7 +12,6 @@ from liger_kernel.transformers.swiglu import (
 from packaging import version
 from transformers import PreTrainedModel
 
-from custom_liger.model.chess_llama import lce_forward as weighted_lce_forward
 
 transformer_version = version.parse(transformers.__version__)
 
@@ -81,8 +74,8 @@ def apply_liger_kernel_to_chess_llama(
         <= 1
     ), "Only one of cross_entropy, fused_linear_cross_entropy, or weighted_fused_linear_cross_entropy can be True."
 
-    from model import chess_llama
-    from model.chess_llama import LlamaModel
+    from chess_gpt.model import chess_llama_2 as chess_llama
+    from chess_gpt.model.chess_llama_2 import LlamaModel
 
     if rope:
         chess_llama.apply_rotary_pos_emb = liger_rotary_pos_emb
@@ -90,31 +83,6 @@ def apply_liger_kernel_to_chess_llama(
         chess_llama.LlamaRMSNorm = LigerRMSNorm
     if swiglu:
         chess_llama.LlamaMLP = LigerSwiGLUMLP
-
-    # if cross_entropy:
-    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-    #         from transformers.loss.loss_utils import nn
-
-    #         nn.functional.cross_entropy = liger_cross_entropy
-    #     else:
-    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-    #         chess_llama.CrossEntropyLoss = LigerCrossEntropyLoss
-
-    # if fused_linear_cross_entropy:
-    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-    #         chess_llama.LlamaForCausalLM.forward = llama_lce_forward
-    #     else:  # if version < 4.46.1
-    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-    #         chess_llama.LlamaForCausalLM.forward = llama_lce_forward_deprecated
-
-    # if weighted_fused_linear_cross_entropy:
-    #     if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
-    #         chess_llama.LlamaForCausalLM.forward = weighted_lce_forward
-    #     else:
-    #         logger.warning(TRANSFORMER_DEPRECATION_WARNING)
-    #         raise ValueError(
-    #             "Weighted Fused Linear Cross Entropy Loss is not supported for transformers versions < 4.46.1"
-    #         )
 
     if model is not None:
         # The model instance already exists, so we need to additionally patch the

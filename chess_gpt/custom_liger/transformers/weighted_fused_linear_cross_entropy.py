@@ -2,10 +2,7 @@ from typing import Optional
 
 import torch
 
-# from ..ops.weighted_fused_linear_cross_entropy import (
-#     WeightedLigerFusedLinearCrossEntropyFunction,
-# )
-from ..ops.new_2 import (
+from ..ops.weighted_fused_linear_cross_entropy import (
     WeightedLigerFusedLinearCrossEntropyFunction,
 )
 

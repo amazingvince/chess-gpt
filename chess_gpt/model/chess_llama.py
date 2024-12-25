@@ -54,6 +54,10 @@ from custom_liger.transformers.weighted_fused_linear_cross_entropy import (
     WeightedLigerFusedLinearCrossEntropyLoss,
 )
 
+from liger_kernel.transformers.fused_linear_cross_entropy import (
+    LigerFusedLinearCrossEntropyLoss,
+)
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
@@ -1147,46 +1151,145 @@ class LlamaModel(LlamaPreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
+# class BertFenEncoder(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.hidden_size = config.hidden_size
+#         self.embedding = nn.Embedding(80, config.hidden_size)  # 80 is FEN vocab size
+
+#         # Simple transformer encoder layer
+#         encoder_layer = nn.TransformerEncoderLayer(
+#             d_model=config.hidden_size,
+#             nhead=8,
+#             dim_feedforward=config.intermediate_size,
+#             dropout=0.1,
+#             activation="gelu",
+#             batch_first=True,
+#         )
+#         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+#         # Project encoded FEN to match model dimensions
+#         self.project = nn.Linear(config.hidden_size, config.hidden_size)
+
+#     def forward(self, fen_input_ids, fen_attention_mask=None):
+#         # Embed FEN tokens
+#         embeddings = self.embedding(fen_input_ids)
+
+#         # Create attention mask for transformer
+#         if fen_attention_mask is not None:
+#             # Convert boolean mask to float
+#             attention_mask = fen_attention_mask.float()
+#             attention_mask = attention_mask.masked_fill(
+#                 attention_mask == 0, float("-inf")
+#             )
+#             attention_mask = attention_mask.masked_fill(attention_mask == 1, float(0.0))
+#         else:
+#             attention_mask = None
+
+#         # Encode FEN sequence
+#         encoded = self.encoder(embeddings, src_key_padding_mask=attention_mask)
+
+#         # Project to final dimensions
+#         return self.project(encoded)
+
+
 class BertFenEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.embedding = nn.Embedding(80, config.hidden_size)  # 80 is FEN vocab size
+        self.model_dtype = torch.bfloat16
+        self.layernorm_dtype = torch.float32
 
-        # Simple transformer encoder layer
+        self.hidden_size = config.hidden_size
+
+        self.position_embeddings = nn.Embedding(
+            config.max_position_embeddings, config.hidden_size
+        )
+        self.token_embeddings = nn.Embedding(80, config.hidden_size)
+
+        # Input layer norm
+        self.layer_norm = nn.LayerNorm(config.hidden_size, dtype=self.layernorm_dtype)
+        self.dropout = nn.Dropout(0.0)
+
+        # Create encoder layer without final norm
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.hidden_size,
-            nhead=8,
+            nhead=config.num_attention_heads,
             dim_feedforward=config.intermediate_size,
-            dropout=0.1,
+            dropout=0.0,
             activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        # Project encoded FEN to match model dimensions
-        self.project = nn.Linear(config.hidden_size, config.hidden_size)
+        # Create encoder without final norm layer
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=config.num_hidden_layers,
+            norm=None,  # Remove the final norm from TransformerEncoder
+        )
+
+        # Separate final norm layer with explicit dtype
+        self.final_norm = nn.LayerNorm(config.hidden_size, dtype=self.layernorm_dtype)
+
+        self.residual = True
+
+        # Define projection layers separately for better dtype control
+        self.proj_linear = nn.Linear(config.hidden_size, config.hidden_size)
+        self.proj_activation = nn.GELU()
+        self.proj_norm = nn.LayerNorm(config.hidden_size, dtype=self.layernorm_dtype)
+
+        # Move all parameters to model_dtype except LayerNorms
+        self.to(self.model_dtype)
+        # Keep LayerNorms in float32
+        self.layer_norm.to(self.layernorm_dtype)
+        self.final_norm.to(self.layernorm_dtype)
+        self.proj_norm.to(self.layernorm_dtype)
 
     def forward(self, fen_input_ids, fen_attention_mask=None):
-        # Embed FEN tokens
-        embeddings = self.embedding(fen_input_ids)
+        device = fen_input_ids.device
+        seq_length = fen_input_ids.size(1)
 
-        # Create attention mask for transformer
+        position_ids = torch.arange(seq_length, device=device, dtype=torch.long)
+        position_ids = position_ids.unsqueeze(0).expand_as(fen_input_ids)
+
+        # Get embeddings and cast to model dtype
+        token_embeddings = self.token_embeddings(fen_input_ids).to(
+            device=device, dtype=self.model_dtype
+        )
+        position_embeddings = self.position_embeddings(position_ids).to(
+            device=device, dtype=self.model_dtype
+        )
+
+        embeddings = token_embeddings + position_embeddings
+
+        # Input layer norm in fp32
+        embeddings = self.layer_norm(embeddings.to(self.layernorm_dtype)).to(
+            self.model_dtype
+        )
+        embeddings = self.dropout(embeddings)
+
+        # Build attention mask
         if fen_attention_mask is not None:
-            # Convert boolean mask to float
-            attention_mask = fen_attention_mask.float()
-            attention_mask = attention_mask.masked_fill(
-                attention_mask == 0, float("-inf")
-            )
-            attention_mask = attention_mask.masked_fill(attention_mask == 1, float(0.0))
+            attention_mask = fen_attention_mask == 0
         else:
             attention_mask = None
 
-        # Encode FEN sequence
+        # Run encoder
         encoded = self.encoder(embeddings, src_key_padding_mask=attention_mask)
 
-        # Project to final dimensions
-        return self.project(encoded)
+        # Apply residual if needed
+        if self.residual:
+            encoded = encoded + embeddings
+
+        # Final norm layer in fp32
+        encoded = self.final_norm(encoded.to(self.layernorm_dtype)).to(self.model_dtype)
+
+        # Project with careful dtype handling
+        out = self.proj_linear(encoded)  # Linear layer already in model_dtype
+        out = self.proj_activation(out)  # GELU preserves dtype
+        out = self.proj_norm(out.to(self.layernorm_dtype)).to(self.model_dtype)
+
+        return out
 
 
 class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
@@ -1199,11 +1302,10 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        # Add FEN encoder
+        # FEN encoder
         self.fen_encoder = BertFenEncoder(config)
 
-        # Initialize weights and apply final processing
-        self.post_init()
+        self.post_init()  # from LlamaPreTrainedModel
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1223,19 +1325,15 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
-    )
     def forward(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        fen_input_ids: torch.LongTensor | None = None,
-        fen_attention_mask: torch.LongTensor | None = None,
+        fen_input_ids: Optional[torch.LongTensor] = None,
+        fen_attention_mask: Optional[torch.LongTensor] = None,
         sample_weights: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Union[List[torch.FloatTensor], Tuple]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1246,90 +1344,141 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         num_logits_to_keep: int = 0,
         **loss_kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
-            num_logits_to_keep (`int`, *optional*):
-                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
-                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
-                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
-
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, LlamaForCausalLM
-
-        >>> model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
-
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
-        ```"""
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        # Encode FEN tokens if provided
+        # ---------------------------
+        # 1. Encode FEN tokens (if provided), prepend them to input
+        # ---------------------------
         if fen_input_ids is not None:
-            fen_embeddings = self.fen_encoder(fen_input_ids, fen_attention_mask)
+            # fen_encoder outputs in bf16 (per above). But our Llama model might also run in bf16 or fp16 or fp32.
+            # Usually you'd do something like:
+            #   fen_embeddings = self.fen_encoder(fen_input_ids, fen_attention_mask).to(self.model.embed_tokens.weight.dtype)
+            # so that it matches the Llama weights. For clarity:
+            fen_embeddings = self.fen_encoder(fen_input_ids, fen_attention_mask).to(
+                self.model.embed_tokens.weight.dtype
+            )
 
-            # If inputs_embeds not provided, create them from input_ids
             if inputs_embeds is None and input_ids is not None:
                 inputs_embeds = self.get_input_embeddings()(input_ids)
 
-            # Prepend FEN embeddings to sequence, only take first token from FEN embedding
-            inputs_embeds = torch.cat([fen_embeddings[:, [0]], inputs_embeds], dim=1)
+            # Prepend FEN embeddings to the LM sequence
+            inputs_embeds = torch.cat([fen_embeddings, inputs_embeds], dim=1)
 
-            # Adjust attention mask to account for prepended FEN tokens
+            # Extend attention_mask
             if attention_mask is not None:
+                fen_seq_len = fen_embeddings.size(1)
                 fen_attn_mask = torch.ones(
-                    (attention_mask.shape[0], 1),
+                    (attention_mask.shape[0], fen_seq_len),
                     dtype=attention_mask.dtype,
                     device=attention_mask.device,
                 )
                 attention_mask = torch.cat([fen_attn_mask, attention_mask], dim=1)
 
-            # Update position_ids to account for the FEN token
+            # Extend position_ids
             if position_ids is not None:
-                fen_position_id = torch.zeros(
-                    (position_ids.shape[0], 1),
-                    dtype=position_ids.dtype,
-                    device=position_ids.device,
+                fen_seq_len = fen_embeddings.size(1)
+                fen_position_id = (
+                    torch.arange(
+                        fen_seq_len,
+                        device=position_ids.device,
+                        dtype=position_ids.dtype,
+                    )
+                    .unsqueeze(0)
+                    .expand(position_ids.shape[0], fen_seq_len)
                 )
-                position_ids = torch.cat([fen_position_id, position_ids + 1], dim=1)
+                position_ids = torch.cat(
+                    [fen_position_id, position_ids + fen_seq_len], dim=1
+                )
 
-            # Update cache_position to account for the FEN token
+            # Extend cache_position if needed
             if cache_position is not None:
-                fen_cache_pos = torch.zeros(
-                    (1,),
-                    dtype=cache_position.dtype,
+                fen_seq_len = fen_embeddings.size(1)
+                fen_cache_pos = torch.arange(
+                    fen_seq_len,
                     device=cache_position.device,
+                    dtype=cache_position.dtype,
                 )
-                cache_position = torch.cat([fen_cache_pos, cache_position + 1])
+                cache_position = torch.cat(
+                    [fen_cache_pos, cache_position + fen_seq_len]
+                )
 
+            # if fen_input_ids is not None:
+            #     # Get FEN embeddings
+            #     fen_embeddings = self.fen_encoder(fen_input_ids, fen_attention_mask).to(
+            #         self.model.embed_tokens.weight.dtype
+            #     )
+
+            #     if inputs_embeds is None and input_ids is not None:
+            #         inputs_embeds = self.get_input_embeddings()(input_ids)
+
+            #     # Process each sequence in the batch to keep only first and last non-pad tokens
+            #     batch_size = fen_embeddings.size(0)
+            #     hidden_size = fen_embeddings.size(-1)
+
+            #     # Initialize tensor to hold selected embeddings (2 tokens per sequence)
+            #     selected_embeddings = torch.zeros(
+            #         (batch_size, 2, hidden_size),
+            #         dtype=fen_embeddings.dtype,
+            #         device=fen_embeddings.device,
+            #     )
+
+            #     # For each sequence in the batch
+            #     for i in range(batch_size):
+            #         # Find non-pad positions
+            #         if fen_attention_mask is not None:
+            #             non_pad_positions = torch.nonzero(
+            #                 fen_attention_mask[i] == 1
+            #             ).squeeze()
+            #         else:
+            #             non_pad_positions = torch.arange(
+            #                 fen_embeddings.size(1), device=fen_embeddings.device
+            #             )
+
+            #         if non_pad_positions.numel() > 0:
+            #             # Get first non-pad token embedding
+            #             selected_embeddings[i, 0] = fen_embeddings[i, non_pad_positions[0]]
+
+            #             # Get last non-pad token embedding (same as first if only one token)
+            #             last_idx = -1 if non_pad_positions.numel() > 1 else 0
+            #             selected_embeddings[i, 1] = fen_embeddings[
+            #                 i, non_pad_positions[last_idx]
+            #             ]
+
+            #     # Concatenate selected FEN embeddings with input embeddings
+            #     inputs_embeds = torch.cat([selected_embeddings, inputs_embeds], dim=1)
+
+            #     # Update attention mask for only two FEN tokens
+            #     if attention_mask is not None:
+            #         fen_attn_mask = torch.ones(
+            #             (attention_mask.shape[0], 2),  # Only 2 tokens now
+            #             dtype=attention_mask.dtype,
+            #             device=attention_mask.device,
+            #         )
+            #         attention_mask = torch.cat([fen_attn_mask, attention_mask], dim=1)
+
+            #     # Update position_ids for only two FEN tokens
+            #     if position_ids is not None:
+            #         fen_position_id = (
+            #             torch.arange(
+            #                 2,  # Only 2 positions
+            #                 device=position_ids.device,
+            #                 dtype=position_ids.dtype,
+            #             )
+            #             .unsqueeze(0)
+            #             .expand(position_ids.shape[0], 2)
+            #         )
+            #         position_ids = torch.cat([fen_position_id, position_ids + 2], dim=1)
+
+            #     # Update cache_position if needed
+            #     if cache_position is not None:
+            #         fen_cache_pos = torch.arange(
+            #             2,  # Only 2 positions
+            #             device=cache_position.device,
+            #             dtype=cache_position.dtype,
+            #         )
+            #         cache_position = torch.cat([fen_cache_pos, cache_position + 2])
+            # ---------------------------
+            # 2. Run the main Llama model
+            # ---------------------------
             outputs = self.model(
-                input_ids=None,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
@@ -1341,16 +1490,12 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 cache_position=cache_position,
                 **loss_kwargs,
             )
-
-            input_ids = None
         else:
-            # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -1359,39 +1504,59 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 **loss_kwargs,
             )
 
-        # Drop fen token in output
-        hidden_states = outputs[0][:, 1:] if fen_input_ids is not None else outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        # ---------------------------
+        # 3. Drop the hidden states for fen_input_ids
+        #    so the shape matches the real token sequence
+        # ---------------------------
+        # 3. Slice out the fen portion of hidden states (drop it), if FEN was used
+        if fen_input_ids is not None:
+            fen_seq_len = fen_embeddings.size(1)
+            hidden_states = outputs[0][:, fen_seq_len:]
+        else:
+            hidden_states = outputs[0]
 
-        if self.config.pretraining_tp > 1:
-            raise Exception("Liger Kernel does not support pretraining_tp!!")
-
+        # ---------------------------
+        # 4. Align (or mask) labels BEFORE shifting hidden states
+        # ---------------------------
+        # 4. Compute loss or logits
         logits = None
         loss = None
-        # if in training mode, don't materialize logits
         if self.training and (labels is not None):
-            # We do the same thing as ForCausalLMLoss but using Liger FLCE
+            if fen_input_ids is not None:
+                # Slice labels to drop the FEN portion
+                # labels = labels[:, fen_seq_len:].contiguous()
+
+                #### OPTION B: MASK FEN LABELS INSTEAD ####
+                # If you *don't* want to remove them, you can mask them by
+                # setting them to -100:
+                labels[:, :fen_seq_len] = -100
+
+                # Now do the usual shift
+
+            # Typical “shift” by 1 for language modeling
 
             shift_hidden_states = hidden_states[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # flatten tokens
             shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
             shift_labels = shift_labels.view(-1)
 
             reduction = "sum" if "num_items_in_batch" in loss_kwargs else "mean"
             lce = WeightedLigerFusedLinearCrossEntropyLoss(reduction=reduction)
+            # lce = LigerFusedLinearCrossEntropyLoss(reduction=reduction)
+
+            # Make sure we're on the right device/dtype
+            shift_hidden_states = shift_hidden_states.to(self.model.device)
+            lm_head_weight = self.lm_head.weight.to(self.model.device)
 
             loss = lce(
-                self.lm_head.weight,
+                lm_head_weight,  # [vocab_size, hidden_size]
                 shift_hidden_states,
                 shift_labels,
                 sample_weights=sample_weights,
             )
-            if reduction == "sum":
-                loss /= loss_kwargs["num_items_in_batch"]
-
-        else:  # if in inference mode materialize logits
+        else:
+            # Inference path: we just produce logits. Possibly only the last K tokens
             logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
             if labels is not None:
                 loss = self.loss_function(
