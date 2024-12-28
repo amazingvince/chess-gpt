@@ -8,16 +8,16 @@ export WANDB_PROJECT="chess"
 echo "wandb watching: $WANDB_WATCH"
 
 # Whether to wait for a debugger to attach
-export ENABLE_DEBUGPY=1
-export CUDA_LAUNCH_BLOCKING=1
+# export ENABLE_DEBUGPY=1
+# export CUDA_LAUNCH_BLOCKING=1
 
 # script arguments
 # cpu_cores=$(nproc)
 # NUM_WORKERS=$((cpu_cores - 4))
 # NUM_WORKERS=$(( NUM_WORKERS > 48 ? 48 : NUM_WORKERS ))
 # NUM_WORKERS=$(( NUM_WORKERS < 1 ? 1 : NUM_WORKERS ))
-NUM_WORKERS=8
-hf_model_tag="chess-llama-mini-v3"
+NUM_WORKERS=2
+hf_model_tag="chess-llama-mini-v3-decoder-only"
 MAX_SOURCE_LEN=2048
 
 
@@ -35,23 +35,23 @@ TOKENIZER_NAME="tokenizer-chess"
 
 export CUDA_VISIBLE_DEVICES=0
 NUM_EPOCHS=1
-LEARNING_RATE=4e-4
-WARMUP_RATIO=100
-BATCH_SIZE=96
-EVAL_BATCH_SIZE=96
-WEIGHT_DECAY=0.1
+LEARNING_RATE=3e-4
+WARMUP_RATIO=3000
+BATCH_SIZE=32
+EVAL_BATCH_SIZE=32
+WEIGHT_DECAY=0.01
 
 # optimizer
 OPTIMIZER_ID="adamw_torch_fused" # adamw_8bit
 GC_STEPS=2
 OPTIM_BETA1=0.90
 OPTIM_BETA2=0.95
-LR_SCHEDULER_TYPE="constant"
+LR_SCHEDULER_TYPE="cosine"
 GRAD_CHKPTING=True
 MAX_GRAD_NORM=1.0
 
 # checkpointing and logging
-CHK_STEPS=1000
+CHK_STEPS=2000
 SAVE_STRATEGY="steps"
 SAVE_LIMIT=1
 LOGGING_STEPS=5
@@ -64,7 +64,7 @@ USE_TF32=True
 
 # eval
 EVAL_STRATEGY=steps #epoch, steps, no
-EVAL_STEPS=1
+EVAL_STEPS=2001
 MAX_EVAL_SAMPLES=2048
 
 DEEPSPEED_CONFIG="deepspeed.json"
@@ -122,6 +122,6 @@ ACCELERATE_LOG_LEVEL=info accelerate launch --config_file accelerate.yaml run_cl
     --block_size $MAX_SOURCE_LEN \
     --use_fast_tokenizer True \
     --trust_remote_code True  \
-    --max_steps 1000000 \
+    --max_steps 100000 \
     --dispatch_batches=False \
     --split_batches=True

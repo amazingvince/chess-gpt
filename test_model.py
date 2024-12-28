@@ -57,26 +57,26 @@ def test_pretrained_model():
     return model
 
 
-# def test_from_config():
-#     config = AutoConfig.from_pretrained(
-#         "/home/vince/code/chess-gpt/chess-llama/config.json",
-#     )
-#     config.torch_dtype = torch.bfloat16
-#     config.use_cache = False
+def test_from_config():
+    config = AutoConfig.from_pretrained(
+        "/home/vince/code/chess-gpt/chess-llama/config.json",
+    )
+    config.torch_dtype = torch.bfloat16
+    config.use_cache = False
 
-#     model = AutoModelForCausalLM.from_config(
-#         config=config,
-#     )
-#     model.train()
-#     # Add these lines
-#     model = model.to("cuda:0")
-#     # model.config._attn_implementation = "flash_attention_2"
-#     return model
+    model = AutoModelForCausalLM.from_config(
+        config=config,
+    )
+    model.train()
+    # Add these lines
+    model = model.to("cuda:0")
+    # model.config._attn_implementation = "flash_attention_2"
+    return model
 
 
 def main():
-    model = test_pretrained_model()
-    # model = test_from_config()
+    # model = test_pretrained_model()
+    model = test_from_config()
 
     move_tokenizer = ChessTokenizer()
     fen_tokenizer = FENTokenizer()

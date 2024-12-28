@@ -37,17 +37,17 @@ export CUDA_VISIBLE_DEVICES=0,1
 NUM_EPOCHS=1
 LEARNING_RATE=3e-4
 WARMUP_RATIO=3000
-BATCH_SIZE=16
-EVAL_BATCH_SIZE=16
+BATCH_SIZE=32
+EVAL_BATCH_SIZE=128
 WEIGHT_DECAY=0.0
 
 # optimizer
 OPTIMIZER_ID="adamw_torch_fused" # adamw_8bit
-GC_STEPS=4
+GC_STEPS=2
 OPTIM_BETA1=0.90
 OPTIM_BETA2=0.95
 LR_SCHEDULER_TYPE="cosine"
-GRAD_CHKPTING=False
+GRAD_CHKPTING=True
 MAX_GRAD_NORM=1.0
 
 # checkpointing and logging
@@ -74,13 +74,13 @@ mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
 
 #  --config_file accelerate.yaml \
-ACCELERATE_LOG_LEVEL=info accelerate launch run_clm.py \
+ACCELERATE_LOG_LEVEL=info accelerate launch run_clm_2.py \
     --dataset_name "$DATASET_TAG" \
     --tokenizer_name "$TOKENIZER_NAME" \
     --do_train \
     --do_eval \
     --streaming True \
-    --config_name "chess-llama/config.json" \
+    --config_name "BEE-spoke-data/smol_llama-220M-GQA" \
     --num_train_epochs $NUM_EPOCHS \
     --save_strategy $SAVE_STRATEGY \
     --evaluation_strategy $EVAL_STRATEGY \

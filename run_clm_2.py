@@ -1,61 +1,69 @@
 #!/usr/bin/env python
 # coding=utf-8
+# Copyright 2020 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Fine-tuning the library models for causal language modeling (GPT, GPT-2, CTRL, ...) on a text file or a dataset.
+
+Here is the full list of checkpoints on the hub that can be fine-tuned by this script:
+https://huggingface.co/models?filter=text-generation
+"""
+# You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
+
 import logging
+import math
 import os
 import sys
-import warnings
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Optional
 
 import datasets
 import evaluate
 import torch
+from datasets import load_dataset
+
 import transformers
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
+    AutoTokenizer,
     HfArgumentParser,
+    Trainer,
     TrainingArguments,
+    default_data_collator,
     is_torch_xla_available,
     set_seed,
 )
-
+from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 
-from transformers.utils.versions import require_version
-import numpy as np
 
-from chess_gpt.custom_liger.monkey_patch import apply_liger_kernel_to_chess_llama
-from chess_gpt.model.chess_llama_2 import ChessLlamaConfig, ChessLlamaForCausalLM
 from chess_gpt.tokenizer import ChessTokenizer, FENTokenizer
 from chess_gpt.utils import ChessModelTrainer, ChessDataCollator
 from chess_gpt.data_loader import make_training_and_eval_datasets
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+from liger_kernel.transformers import apply_liger_kernel_to_llama
 
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-# from liger_kernel.transformers import apply_liger_kernel_to_llama
-
-# apply_liger_kernel_to_llama(
-#     rope=True,
-#     swiglu=True,
-#     cross_entropy=False,
-#     fused_linear_cross_entropy=True,
-#     rms_norm=False,
-# )
 
 
-# MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
-# MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
-
-# AutoConfig.register("chess_llama", ChessLlamaConfig)
-# AutoModelForCausalLM.register(ChessLlamaConfig, ChessLlamaForCausalLM)
+MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
+MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
 @dataclass
@@ -76,7 +84,7 @@ class ModelArguments:
         default=None,
         metadata={
             "help": "If training from scratch, pass a model type from the list: "
-            # + ", ".join(MODEL_TYPES)
+            + ", ".join(MODEL_TYPES)
         },
     )
     config_overrides: Optional[str] = field(
@@ -127,27 +135,18 @@ class ModelArguments:
             )
         },
     )
-    use_auth_token: bool = field(
-        default=None,
-        metadata={
-            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead."
-        },
-    )
     trust_remote_code: bool = field(
         default=False,
         metadata={
             "help": (
-                "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
-                "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
-                "execute code present on the Hub on your local machine."
+                "Whether to trust the execution of code from datasets/models defined on the Hub."
+                " This option should only be set to `True` for repositories you trust and in which you have read the"
+                " code, as it will execute code present on the Hub on your local machine."
             )
         },
     )
-    attn_implementation: Optional[str] = field(
-        default="flash_attention_2",
-    )
     torch_dtype: Optional[str] = field(
-        default="bfloat16",
+        default=None,
         metadata={
             "help": (
                 "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
@@ -249,10 +248,6 @@ class DataTrainingArguments:
     )
 
     def __post_init__(self):
-        if self.streaming:
-            require_version(
-                "datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`"
-            )
 
         if (
             self.dataset_name is None
@@ -280,6 +275,9 @@ class DataTrainingArguments:
 
 
 def main():
+    # See all possible arguments in src/transformers/training_args.py
+    # or by passing the --help flag to this script.
+    # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser(
         (ModelArguments, DataTrainingArguments, TrainingArguments)
@@ -292,17 +290,6 @@ def main():
         )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    if model_args.use_auth_token is not None:
-        warnings.warn(
-            "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead.",
-            FutureWarning,
-        )
-        if model_args.token is not None:
-            raise ValueError(
-                "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
-            )
-        model_args.token = model_args.use_auth_token
 
     # Setup logging
     logging.basicConfig(
@@ -353,7 +340,21 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # Load pretrained model and tokenizer
+    fen_tokenizer = FENTokenizer()
+    move_tokenizer = ChessTokenizer()
+
+    config = {"lichess_games": 0.50, "laion_games": 0.50}
+    train_dataset, eval_dataset = make_training_and_eval_datasets(
+        config, mid_game_prob=0.0
+    )
+    data_collator = ChessDataCollator(
+        move_tokenizer=move_tokenizer,
+        fen_tokenizer=fen_tokenizer,
+        mlm=False,
+        include_fen=False,
+        max_length=2048,
+    )
+
     config_kwargs = {
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
@@ -367,7 +368,7 @@ def main():
             model_args.model_name_or_path, **config_kwargs
         )
     else:
-        # config = CONFIG_MAPPING[model_args.model_type]()
+        config = CONFIG_MAPPING[model_args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
         if model_args.config_overrides is not None:
             logger.info(f"Overriding config: {model_args.config_overrides}")
@@ -404,12 +405,14 @@ def main():
         logger.info(
             f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
         )
+        print(model)
+        print(model.config.to_dict())
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
+        model.resize_token_embeddings(len(tokenizer))
 
     if training_args.do_eval:
 
@@ -422,102 +425,25 @@ def main():
 
         metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
 
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
-        # preds have the same shape as the labels, after the argmax(-1) has been calculated
-        # by preprocess_logits_for_metrics but we need to shift the labels
-        labels = labels[:, 1:].reshape(-1)
-        preds = preds[:, :-1].reshape(-1)
+        def compute_metrics(eval_preds):
+            preds, labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics but we need to shift the labels
+            labels = labels[:, 1:].reshape(-1)
+            preds = preds[:, :-1].reshape(-1)
+            return metric.compute(predictions=preds, references=labels)
 
-        # Create a mask for tokens to exclude
-        # You can modify this list based on your needs
-        tokens_to_exclude = [
-            -100,
-            0,
-            1,
-            2,
-            3,
-            73,
-            74,
-            75,
-            76,
-        ]  # Example: excluding padding token (0) and ignored index (-100)
-        mask = ~np.isin(labels, tokens_to_exclude)
+    # apply_liger_kernel_to_llama(
+    #     rope=True,
+    #     swiglu=True,
+    #     cross_entropy=False,
+    #     fused_linear_cross_entropy=True,
+    #     rms_norm=False,
+    # )
 
-        # Apply mask to both predictions and labels
-        filtered_preds = preds[mask]
-        filtered_labels = labels[mask]
-
-        # Compute metrics only on filtered tokens
-        results = metric.compute(predictions=filtered_preds, references=filtered_labels)
-
-        # Optionally, you can add more metrics here
-        # For example, you might want to track how many tokens were excluded
-        results["excluded_tokens_percentage"] = 100 * (
-            1 - len(filtered_preds) / len(preds)
-        )
-
-        return results
-
-    # apply_liger_kernel_to_chess_llama(model=model)
-
-    model = torch.compile(model, backend="inductor")
+    # model = torch.compile(model, backend="inductor")
     training_args.include_num_input_tokens_seen = True
-    # training_args.use_liger_kernel = True
-    # training_args.ddp_find_unused_parameters = False
     # Initialize our Trainer
-
-    fen_tokenizer = FENTokenizer()
-    move_tokenizer = ChessTokenizer()
-
-    def training_phase(model, phase):
-        if phase == "encoder":
-            config = {"lichess_games": 0.40, "puzzles": 0.30, "laion_games": 0.30}
-            train_dataset, eval_dataset = make_training_and_eval_datasets(
-                config, mid_game_prob=0.7
-            )
-            data_collator = ChessDataCollator(
-                move_tokenizer=move_tokenizer,
-                fen_tokenizer=fen_tokenizer,
-                mlm=False,
-                include_fen=True,
-                max_length=2048,
-            )
-            model.freeze_decoder()
-
-        elif phase == "decoder":
-            config = {"lichess_games": 0.50, "laion_games": 0.50}
-            train_dataset, eval_dataset = make_training_and_eval_datasets(
-                config, mid_game_prob=0.0
-            )
-
-            data_collator = ChessDataCollator(
-                move_tokenizer=move_tokenizer,
-                fen_tokenizer=fen_tokenizer,
-                mlm=False,
-                include_fen=False,
-                max_length=2048,
-            )
-            model.freeze_encoder()
-        else:
-            # config = {"lichess_games": 0.40, "puzzles": 0.30, "laion_games": 0.30}
-            config = {"lichess_games": 0.50, "laion_games": 0.50}
-            train_dataset, eval_dataset = make_training_and_eval_datasets(
-                config, mid_game_prob=0.0
-            )
-            data_collator = ChessDataCollator(
-                move_tokenizer=move_tokenizer,
-                fen_tokenizer=fen_tokenizer,
-                mlm=False,
-                include_fen=True,
-                max_length=2048,
-            )
-
-        return train_dataset, eval_dataset, data_collator, model
-
-    train_dataset, eval_dataset, data_collator, model = training_phase(model, "full")
-
-    # Initialize trainer
     trainer = ChessModelTrainer(
         model=model,
         args=training_args,
@@ -534,7 +460,6 @@ def main():
             if training_args.do_eval and not is_torch_xla_available()
             else None
         ),
-        # optimizers=create_scheduler(create_optimizer_with_muon(model, training_args)),
     )
 
     # Training
@@ -561,6 +486,25 @@ def main():
         trainer.save_state()
 
     # Evaluation
+    if training_args.do_eval:
+        logger.info("*** Evaluate ***")
+
+        metrics = trainer.evaluate()
+
+        max_eval_samples = (
+            data_args.max_eval_samples
+            if data_args.max_eval_samples is not None
+            else len(eval_dataset)
+        )
+        metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        try:
+            perplexity = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            perplexity = float("inf")
+        metrics["perplexity"] = perplexity
+
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
 
     kwargs = {
         "finetuned_from": model_args.model_name_or_path,
@@ -588,9 +532,4 @@ def _mp_fn(index):
 
 
 if __name__ == "__main__":
-    if os.environ.get("ENABLE_DEBUGPY"):
-        import debugpy
-
-        debugpy.listen(5678)
-        debugpy.wait_for_client()
     main()

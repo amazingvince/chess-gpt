@@ -1,52 +1,8 @@
 {
-    "_name_or_path": "chess_llama",
-  "architectures": [
-    "ChessLlamaForCausalLM"
-  ],
-  "model_type": "chess_llama",
-  "encoder_config": {
-      "attention_bias": false,
-      "attention_dropout": 0.0,
-      "bos_token_id": 3,
-      "classifier_activation": "gelu",
-      "classifier_bias": false,
-      "classifier_dropout": 0.0,
-      "classifier_pooling": "mean",
-      "cls_token_id": 3,
-      "decoder_bias": true,
-      "deterministic_flash_attn": false,
-      "embedding_dropout": 0.0,
-      "eos_token_id": 1,
-      "global_attn_every_n_layers": 3,
-      "global_rope_theta": 160000.0,
-      "gradient_checkpointing": false,
-      "hidden_activation": "gelu",
-      "hidden_size": 1024,
-      "initializer_cutoff_factor": 2.0,
-      "initializer_range": 0.02,
-      "intermediate_size": 1152,
-      "layer_norm_eps": 1e-05,
-      "local_attention": 128,
-      "local_rope_theta": 10000.0,
-      "max_position_embeddings": 512,
-      "mlp_bias": false,
-      "mlp_dropout": 0.0,
-      "model_type": "modernbert",
-      "norm_bias": false,
-      "norm_eps": 1e-05,
-      "num_attention_heads": 8,
-      "num_hidden_layers": 8,
-      "pad_token_id": 2,
-      "position_embedding_type": "absolute",
-      "sep_token_id": 1,
-      "tie_word_embeddings": true,
-      "torch_dtype": "float32",
-      "transformers_version": "4.47.0.dev0",
-      "vocab_size": 80,
-      "attention_type": "flash_attention_2"
-    },
-
-  "decoder_config": {
+    "_name_or_path": "amazingvince/chess-llama",
+    "architectures": [
+      "ChessLlamaForCausalLM"
+    ],
     "attention_bias": false,
     "attention_dropout": 0.0,
     "bos_token_id": 0,
@@ -55,7 +11,7 @@
     "hidden_size": 1024,
     "initializer_range": 0.02,
     "intermediate_size": 4096,
-    "max_position_embeddings": 2048,
+    "max_position_embeddings": 1024,
     "model_type": "chess_llama",
     "num_attention_heads": 32,
     "num_hidden_layers": 20,
@@ -69,6 +25,6 @@
     "transformers_version": "4.37.0.dev0",
     "use_cache": true,
     "vocab_size": 80,
-          "attention_type": "flash_attention_2"
-  }
+    "encoder_config":{"hidden_size": 1024}
 }
+

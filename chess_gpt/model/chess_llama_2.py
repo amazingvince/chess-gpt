@@ -1,16 +1,17 @@
 import torch
 import torch.nn as nn
+
+from typing import Optional, Tuple, Union, List, Any, Dict
+
+# From Hugging Face Transformers
 from transformers import (
     LlamaPreTrainedModel,
     LlamaModel,
     LlamaConfig,
-    PretrainedConfig,
-    ModernBertConfig,
-    ModernBertModel,
 )
-from transformers.generation import GenerationMixin
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.processing_utils import Unpack
+from transformers.generation import GenerationMixin
 from transformers.utils import LossKwargs
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 
@@ -22,32 +23,143 @@ from liger_kernel.transformers.fused_linear_cross_entropy import (
     LigerFusedLinearCrossEntropyLoss,
 )
 
-from typing import Optional, Tuple, Union, List, Any, Dict
 
-
+# ---------------------------------------------------------------------
 # Custom annotation combining flash-attn and custom loss kwargs
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+# ---------------------------------------------------------------------
+class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs):
+    """
+    Custom Kwargs class to unify FlashAttention and Loss arguments.
+    """
+
+    ...
 
 
-class ChessLlamaConfig(PretrainedConfig):
+# ---------------------------------------------------------------------
+# ChessLlamaConfig
+# ---------------------------------------------------------------------
+class ChessLlamaConfig(LlamaConfig):
+    """
+    Configuration for ChessLlama, which extends LlamaConfig
+    with an additional encoder config dict.
+    """
+
     model_type = "chess_llama"
 
-    def __init__(self, encoder_config=None, decoder_config=None, **kwargs):
+    def __init__(self, encoder_config: Optional[Dict] = None, **kwargs):
+        if encoder_config is None:
+            # Provide a minimal default
+            encoder_config = {
+                "hidden_size": 1024,
+                "max_position_embeddings": 512,
+                "num_attention_heads": 8,
+                "intermediate_size": 4096,
+                "num_hidden_layers": 4,
+            }
         super().__init__(**kwargs)
-
-        # Initialize with defaults if configs not provided
-        encoder_config = encoder_config or {}
-        decoder_config = decoder_config or {}
-
-        self.encoder_config = ModernBertConfig(**encoder_config)
-        self.decoder_config = LlamaConfig(**decoder_config)
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        config_dict = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
-        return cls.from_dict(config_dict, **kwargs)
+        self.encoder_config = encoder_config
 
 
+# ---------------------------------------------------------------------
+# BertFenEncoder
+# ---------------------------------------------------------------------
+class BertFenEncoder(nn.Module):
+    """
+    A simple Transformer-based encoder for "fen" inputs.
+    Returns a tensor of shape [batch_size, seq_len, hidden_size].
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        # self.model_dtype = torch.bfloat16
+        # self.layernorm_dtype = torch.float32
+
+        self.hidden_size = config.hidden_size
+        self.max_position_embeddings = config.max_position_embeddings
+        self.num_attention_heads = config.num_attention_heads
+        self.intermediate_size = config.intermediate_size
+        self.num_hidden_layers = config.num_hidden_layers
+
+        self.position_embeddings = nn.Embedding(
+            self.max_position_embeddings, self.hidden_size
+        )
+        self.token_embeddings = nn.Embedding(80, self.hidden_size)  # Adjust as needed
+
+        # Input layer norm
+        self.layer_norm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+
+        self.dropout = nn.Dropout(0.0)
+
+        # Create encoder layer (no final norm inside)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_size,
+            nhead=self.num_attention_heads,
+            dim_feedforward=self.intermediate_size,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+
+        # Create encoder, but remove the final norm
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=self.num_hidden_layers,
+            norm=None,
+        )
+
+        # Separate final norm layer with explicit dtype
+        self.final_norm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+
+        self.residual = True
+
+        # Define projection layers separately for better dtype control
+        self.proj_linear = nn.Linear(self.hidden_size, self.hidden_size)
+        self.proj_activation = nn.GELU()
+        self.proj_norm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+
+        # Move all parameters to model_dtype except LayerNorms
+
+        # self.layer_norm.to(self.layernorm_dtype)
+        # self.final_norm.to(self.layernorm_dtype)
+        # self.proj_norm.to(self.layernorm_dtype)
+
+    def forward(self, fen_input_ids, fen_attention_mask=None):
+        device = fen_input_ids.device  # Get device from input
+        seq_length = fen_input_ids.size(1)
+
+        # Ensure all tensors are on the correct device
+        position_ids = torch.arange(seq_length, device=device, dtype=torch.long)
+        position_ids = position_ids.unsqueeze(0).expand_as(fen_input_ids)
+
+        token_embeddings = self.token_embeddings(fen_input_ids).to(device)
+        position_embeddings = self.position_embeddings(position_ids).to(device)
+
+        embeddings = token_embeddings + position_embeddings
+        embeddings = self.layer_norm(embeddings)
+        embeddings = self.dropout(embeddings)
+
+        if fen_attention_mask is not None:
+            attention_mask = fen_attention_mask == 0
+        else:
+            attention_mask = None
+
+        encoded = self.encoder(embeddings, src_key_padding_mask=attention_mask)
+
+        if self.residual:
+            encoded = encoded + embeddings
+
+        encoded = self.final_norm(encoded)
+        out = self.proj_linear(encoded)
+        out = self.proj_activation(out)
+        out = self.proj_norm(out)
+
+        return out
+
+
+# ---------------------------------------------------------------------
+# ChessLlamaForCausalLM
+# ---------------------------------------------------------------------
 class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     config_class = ChessLlamaConfig
     _keys_to_ignore_on_child_class = [
@@ -58,26 +170,20 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     main_input_name = "input_ids"
 
     def __init__(self, config: ChessLlamaConfig):
-        super().__init__(config.decoder_config)
-        self.model = LlamaModel(config.decoder_config)
-        self.vocab_size = config.decoder_config.vocab_size
-        self.lm_head = nn.Linear(
-            config.decoder_config.hidden_size,
-            config.decoder_config.vocab_size,
-            bias=False,
-        )
+        super().__init__(config)
+        self.model = LlamaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # FEN encoder
-        self.fen_encoder = ModernBertModel(config.encoder_config)
+        self.fen_encoder = BertFenEncoder(config)
         self.encoder_projection = nn.Linear(
-            config.encoder_config.hidden_size, config.decoder_config.hidden_size
+            config.encoder_config["hidden_size"], config.hidden_size
         )
-
+        self.fen_prefix_added_for_generation = False
         self.post_init()  # from LlamaPreTrainedModel
 
-    # --------------------------------------------------------------------------------
-    # Optional freeze/unfreeze helpers
-    # --------------------------------------------------------------------------------
+    # ----------------- Optional freeze/unfreeze helpers ------------------
     def freeze_encoder(self):
         for param in self.fen_encoder.parameters():
             param.requires_grad = False
@@ -102,9 +208,7 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         for param in self.lm_head.parameters():
             param.requires_grad = True
 
-    # --------------------------------------------------------------------------------
-    # Standard model methods
-    # --------------------------------------------------------------------------------
+    # --------------------- Standard model methods ------------------------
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -123,12 +227,10 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    # --------------------------------------------------------------------------------
-    # Forward pass
-    # --------------------------------------------------------------------------------
+    # ------------------------- Forward pass ------------------------------
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         fen_input_ids: Optional[torch.LongTensor] = None,
         fen_attention_mask: Optional[torch.LongTensor] = None,
@@ -143,27 +245,35 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        **loss_kwargs: Unpack[KwargsForCausalLM],
+        **loss_kwargs: KwargsForCausalLM,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        # --------------------------------------------------------------------
-        # Handle input embeddings
-        # --------------------------------------------------------------------
-        if inputs_embeds is None:
-            if input_ids is not None:
-                inputs_embeds = self.get_input_embeddings()(input_ids)
-            else:
-                raise ValueError(
-                    "You have to specify either input_ids or inputs_embeds"
-                )
+        if return_dict is None:
+            return_dict = self.config.use_return_dict
 
-        # --------------------------------------------------------------------
+        device = self.model.device
+
+        if input_ids is not None:
+            input_ids = input_ids.to(device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+        if fen_input_ids is not None:
+            fen_input_ids = fen_input_ids.to(device)
+        if fen_attention_mask is not None:
+            fen_attention_mask = fen_attention_mask.to(device)
+
+        # --------------------------------------------------------------
         # If we have a FEN prefix on the first pass (or training),
         # incorporate it into the embeddings, attention_mask, etc.
-        # --------------------------------------------------------------------
-        if fen_input_ids is not None and (self.training or past_key_values is None):
+        # --------------------------------------------------------------
+        if self.training and fen_input_ids is not None and inputs_embeds is None:
+            device = input_ids.device
+            # Convert input_ids to embeddings
+            inputs_embeds = self.get_input_embeddings()(input_ids).to(device)
+
+            # Optionally adjust labels to account for new prefix positions
             if labels is not None:
-                # Add -100 (ignore index) to align with the new prefix token
+                # Add -100 (ignore index) for the prefix
                 labels = torch.cat(
                     [
                         torch.full(
@@ -175,7 +285,8 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                         labels,
                     ],
                     dim=1,
-                )
+                ).to(labels.device)
+            # Insert FEN prefix
             inputs_embeds, attention_mask, position_ids, cache_position = (
                 self.add_fen_prefix(
                     inputs_embeds,
@@ -186,18 +297,13 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                     cache_position,
                 )
             )
+        elif inputs_embeds is None and input_ids is not None:
+            # On subsequent passes or if fen is not given
+            inputs_embeds = self.get_input_embeddings()(input_ids)
 
-        # Ensure contiguous
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds.contiguous()
-        if attention_mask is not None:
-            attention_mask = attention_mask.contiguous()
-        if position_ids is not None:
-            position_ids = position_ids.contiguous()
-
-        # --------------------------------------------------------------------
-        # Pass through the Llama decoder
-        # --------------------------------------------------------------------
+        # --------------------------------------------------------------
+        # Pass through Llama
+        # --------------------------------------------------------------
         outputs = self.model(
             input_ids=None,
             attention_mask=attention_mask,
@@ -215,27 +321,19 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         logits = None
         loss = None
 
-        # --------------------------------------------------------------------
-        # Training: compute the shift for labels + hidden states
-        # --------------------------------------------------------------------
+        # --------------------------------------------------------------
+        # Training: shift hidden states and labels
+        # --------------------------------------------------------------
         if self.training and labels is not None:
             # Shift hidden_states/labels for next-token prediction
             shift_hidden_states = hidden_states[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
+            # Flatten
             shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
             shift_labels = shift_labels.view(-1)
 
-            # logits = self.lm_head(shift_hidden_states)
-
-            # loss = self.loss_function(
-            #     logits=logits,
-            #     labels=shift_labels,  # Use shifted labels
-            #     vocab_size=self.config.vocab_size,
-            #     **loss_kwargs,
-            # )
-
-            # # Handle weighted or unweighted loss
+            # Weighted vs unweighted fused cross entropy
             reduction = "sum" if "num_items_in_batch" in loss_kwargs else "mean"
             if sample_weights is not None:
                 loss_fct = WeightedLigerFusedLinearCrossEntropyLoss(reduction=reduction)
@@ -252,9 +350,10 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                     shift_hidden_states,
                     shift_labels,
                 )
-        # --------------------------------------------------------------------
-        # Inference: compute logits. Possibly only for the last token
-        # --------------------------------------------------------------------
+
+        # --------------------------------------------------------------
+        # Inference: compute logits (optionally for the last token only)
+        # --------------------------------------------------------------
         else:
             if past_key_values is not None:
                 # Only compute the last token's logits
@@ -265,22 +364,21 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
             logits = self.lm_head(hidden_states)
 
-            # If labels are provided in eval mode, compute cross entropy
+            # If labels are provided in eval mode, compute some CE loss
             if labels is not None:
-                loss = self.loss_function(
-                    logits=logits,
-                    labels=labels,
-                    vocab_size=self.config.vocab_size,
-                    **loss_kwargs,
+                # Here you could define a simpler CE loss or use HF's built-in
+                # If you still want to use your custom fused loss, do:
+                # (But you'll need to shift labels if needed.)
+                loss = self.simple_eval_loss_function(
+                    logits,
+                    labels,
+                    ignore_index=-100,  # or whatever you prefer
                 )
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
-        # --------------------------------------------------------------------
-        # Return
-        # --------------------------------------------------------------------
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -289,9 +387,31 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             attentions=outputs.attentions,
         )
 
-    # --------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Simple evaluation loss (optional helper)
+    # ------------------------------------------------------------------
+    def simple_eval_loss_function(
+        self,
+        logits: torch.FloatTensor,
+        labels: torch.LongTensor,
+        ignore_index: int = -100,
+    ) -> torch.FloatTensor:
+        """
+        A basic cross-entropy for evaluation only (not fused).
+        """
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        loss_fct = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
+        return loss
+
+    # ------------------------------------------------------------------
     # Helper to add FEN prefix embedding and fix attention mask
-    # --------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+
     def add_fen_prefix(
         self,
         inputs_embeds: torch.FloatTensor,
@@ -306,213 +426,160 @@ class ChessLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         Optional[torch.LongTensor],
         Optional[torch.LongTensor],
     ]:
-        # Encode the fen_input_ids with ModernBert
-        encoder_outputs = self.fen_encoder(
-            input_ids=fen_input_ids,
-            attention_mask=fen_attention_mask,
-            return_dict=True,
-        )
-        # Use the [CLS] token or first hidden state as the prefix
-        cls_token = encoder_outputs.last_hidden_state[:, 0, :]
-        cls_token = self.encoder_projection(cls_token).unsqueeze(1)
+        """
+        Encodes the FEN input via self.fen_encoder, takes the [0th] token
+        as a "CLS" prefix, and concatenates it to the main `inputs_embeds`.
+        Also updates the attention mask, position_ids, and cache_position.
+        """
+        # Get target device from inputs_embeds
+        device = inputs_embeds.device
+        dtype = inputs_embeds.dtype
 
-        # --------------------------------------------------------------------
-        # Add prefix to embeddings
-        # --------------------------------------------------------------------
-        inputs_embeds = torch.cat([cls_token, inputs_embeds], dim=1)
-
-        # --------------------------------------------------------------------
-        # Update the attention mask
-        # (handle either a 2D or a 4D mask)
-        # --------------------------------------------------------------------
+        # Move all input tensors to the same device
+        if fen_input_ids is not None:
+            fen_input_ids = fen_input_ids.to(device)
+        if fen_attention_mask is not None:
+            fen_attention_mask = fen_attention_mask.to(device)
         if attention_mask is not None:
-            # If it's 2D shape (batch_size, seq_len)
-            if attention_mask.dim() == 2:
-                # Convert to the model’s dtype (e.g. float16/bfloat16/float32).
-                # We'll assume we match inputs_embeds.dtype, which is typical in
-                # half-precision training.
-                attention_mask = attention_mask.to(inputs_embeds.dtype)
+            attention_mask = attention_mask.to(device)
+        if position_ids is not None:
+            position_ids = position_ids.to(device)
+        if cache_position is not None:
+            cache_position = cache_position.to(device)
 
-                # You might keep your 1s as keep-tokens or invert them:
-                # e.g. 1 = keep, 0 = masked. For flash attention, we typically
-                # convert (1 -> 0.0, 0 -> -inf). One approach:
-                attention_mask = (1.0 - attention_mask) * torch.finfo(
-                    attention_mask.dtype
-                ).min
+        # Ensure fen_encoder is on the correct device
+        self.fen_encoder = self.fen_encoder.to(device)
+        self.encoder_projection = self.encoder_projection.to(device)
 
-                # Now prepend a prefix mask
-                prefix_mask = torch.zeros(
-                    (attention_mask.shape[0], 1),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                # Prepend that zero row
-                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
-
-            # If it's a 4D shape (used during generation)
-            else:
-                batch_size = attention_mask.shape[0]
-                # We create a single zero column for the prefix
-                prefix_mask = torch.zeros(
-                    (batch_size, 1, 1, 1),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                prefix_mask = prefix_mask.expand(-1, attention_mask.shape[1], 1, -1)
-                attention_mask = torch.cat([prefix_mask, attention_mask], dim=-1)
-
-        # --------------------------------------------------------------------
-        # Update position_ids
-        # --------------------------------------------------------------------
-        if position_ids is None:
-            position_ids = (
-                torch.arange(
-                    0,
-                    inputs_embeds.size(1),
-                    dtype=torch.long,
-                    device=inputs_embeds.device,
-                )
-                .unsqueeze(0)
-                .expand(inputs_embeds.size(0), -1)
+        # Get FEN embeddings
+        with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
+            fen_outputs = self.fen_encoder(
+                fen_input_ids=fen_input_ids,
+                fen_attention_mask=fen_attention_mask,
             )
+
+            # Take the [0] token and project it
+            cls_token = fen_outputs[:, 0, :]
+            cls_token = self.encoder_projection(cls_token).unsqueeze(1)
+
+            # Ensure same dtype as inputs_embeds
+            cls_token = cls_token.to(inputs_embeds.device)
+            cls_token = cls_token.to(dtype=dtype)
+
+            # Concatenate embeddings
+            inputs_embeds = torch.cat([cls_token, inputs_embeds], dim=1)
+
+        # Handle attention mask
+        if attention_mask is not None:
+            fen_attn_mask = torch.ones(
+                (attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=device
+            )
+            attention_mask = torch.cat([fen_attn_mask, attention_mask], dim=1)
+
+        # Handle position IDs
+        if position_ids is None:
+            position_ids = torch.arange(
+                0, inputs_embeds.size(1), dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).expand(inputs_embeds.size(0), -1)
         else:
             prefix_position_ids = torch.zeros(
-                (position_ids.shape[0], 1),
-                dtype=torch.long,
-                device=position_ids.device,
+                (position_ids.shape[0], 1), dtype=torch.long, device=device
             )
-            # Shift by +1
-            position_ids = position_ids + 1
+            position_ids = position_ids + 1  # Shift by +1
             position_ids = torch.cat([prefix_position_ids, position_ids], dim=1)
 
-        # --------------------------------------------------------------------
-        # Update cache_position if present
-        # --------------------------------------------------------------------
+        # Handle cache position
         if cache_position is not None:
             cache_position = cache_position + 1
 
-        return inputs_embeds, attention_mask, position_ids, cache_position
+        return (
+            inputs_embeds,
+            attention_mask,
+            position_ids,
+            cache_position,
+        )
 
-    # --------------------------------------------------------------------------------
+    def reset_fen_prefix_flag(self):
+        """
+        Simple helper that you can call before each new generation
+        to ensure we always re-inject the FEN prefix on the *first* step
+        of each generation call.
+        """
+        self.fen_prefix_added_for_generation = False
+
+    # ------------------------------------------------------------------
     # Prepare inputs for generation (beam search, etc.)
-    # --------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
         fen_input_ids: Optional[torch.LongTensor] = None,
         fen_attention_mask: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        This method is used during generation to prepare inputs on each iteration.
+        Called automatically by .generate() each decoding step.
+        We only want to add the FEN prefix on the *first* step, so we use
+        the boolean `self.fen_prefix_added_for_generation`.
         """
-        first_pass = past_key_values is None or len(past_key_values) == 0
-        batch_size = (
-            input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
-        )
+        use_cache = kwargs.get("use_cache", True)
 
-        # --------------------------------------------------------------------
-        # On the first pass, we may add the FEN prefix
-        # --------------------------------------------------------------------
-        if first_pass:
+        # If no cache yet (past_key_values=None) *and* we haven't already
+        # added the FEN prefix for this generation *and* fen_input_ids is provided:
+        if (
+            (past_key_values is None)
+            and not self.fen_prefix_added_for_generation
+            and (fen_input_ids is not None)
+        ):
+            # Convert your input_ids to embeddings
             if inputs_embeds is None and input_ids is not None:
                 inputs_embeds = self.get_input_embeddings()(input_ids)
 
-            if fen_input_ids is not None:
-                inputs_embeds, attention_mask, position_ids, cache_position = (
-                    self.add_fen_prefix(
-                        inputs_embeds,
-                        attention_mask,
-                        position_ids,
-                        fen_input_ids,
-                        fen_attention_mask,
-                        cache_position,
-                    )
-                )
+            # Add the prefix once
+            inputs_embeds, attention_mask, _, _ = self.add_fen_prefix(
+                inputs_embeds,
+                attention_mask,
+                position_ids=None,
+                fen_input_ids=fen_input_ids,
+                fen_attention_mask=fen_attention_mask,
+            )
 
-            # ----------------------------------------------------------------
-            # Create a 4D causal mask for generation
-            # (batch_size, 1, seq_len, seq_len)
-            # ----------------------------------------------------------------
-            if attention_mask is not None:
-                # Make sure to match our model dtype
-                attention_mask = attention_mask.to(inputs_embeds.dtype).contiguous()
-                seq_length = attention_mask.shape[1]
+            # Mark that we've done it
+            self.fen_prefix_added_for_generation = True
 
-                # Build an upper-triangular mask in the same dtype
-                causal_mask = torch.triu(
-                    torch.ones(
-                        seq_length,
-                        seq_length,
-                        device=attention_mask.device,
-                        dtype=attention_mask.dtype,
-                    ),
-                    diagonal=1,
-                ).bool()
+            # In subsequent calls, we won’t pass fen_input_ids again
+            fen_input_ids = None
+            fen_attention_mask = None
 
-                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-                attention_mask = attention_mask.expand(batch_size, -1, seq_length, -1)
-                # Fill with -inf where causal_mask is True
-                attention_mask = attention_mask.masked_fill(
-                    causal_mask, torch.finfo(attention_mask.dtype).min
-                )
-                attention_mask = attention_mask.contiguous()
-
-        # --------------------------------------------------------------------
-        # Subsequent passes (cached decoding)
-        # --------------------------------------------------------------------
         else:
-            # We'll only embed the last token if we have new input_ids
-            if inputs_embeds is None and input_ids is not None:
+            # On subsequent steps (or if prefix already added), we only embed the last token
+            if (inputs_embeds is None) and (input_ids is not None):
+                # If caching is off (use_cache=False), we might get the entire sequence each time,
+                # but we do NOT want to re-inject FEN. So we only embed the last token here.
                 inputs_embeds = self.get_input_embeddings()(input_ids[:, -1:])
 
-            # Slice out the last position for position_ids
-            if position_ids is not None:
-                position_ids = position_ids[:, -1:]
-            else:
-                # If we track a cache_position, increment it
-                if cache_position is not None:
-                    position_ids = cache_position.unsqueeze(-1)
-                else:
-                    # Otherwise, fallback to length-based
-                    position_ids = torch.LongTensor([input_ids.shape[1] - 1]).to(
-                        input_ids.device
-                    )
-                    position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+            # If there's an attention_mask, slice it for the new token
+            if (attention_mask is not None) and (attention_mask.shape[1] > 1):
+                attention_mask = attention_mask[:, -1:]
 
-        # Make all relevant tensors contiguous
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds.contiguous()
-        if position_ids is not None:
-            position_ids = position_ids.contiguous()
-
-        # Bump cache_position by 1 each step after first pass
-        if cache_position is not None and not first_pass:
-            cache_position = cache_position + 1
-
-        # Assemble dictionary to feed the next forward call
-        model_inputs = {
-            "input_ids": input_ids if first_pass else None,
+        return {
+            "input_ids": None,  # Because we have inputs_embeds
             "inputs_embeds": inputs_embeds,
-            "past_key_values": past_key_values,
             "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "cache_position": cache_position,
-            "use_cache": kwargs.get("use_cache", True),
-            "fen_input_ids": fen_input_ids if first_pass else None,
-            "fen_attention_mask": fen_attention_mask if first_pass else None,
+            "past_key_values": past_key_values,
+            "use_cache": use_cache,
+            "fen_input_ids": None,  # don’t pass these forward again
+            "fen_attention_mask": None,
         }
 
-        return model_inputs
-
-    # --------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Reorder cache for beam search
-    # --------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     def _reorder_cache(
         self, past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.LongTensor
     ) -> Tuple[Tuple[torch.Tensor]]:
