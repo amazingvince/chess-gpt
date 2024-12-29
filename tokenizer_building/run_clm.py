@@ -355,7 +355,7 @@ def main():
 
     # Create datasets with 30% chance of mid-game starts
     train_dataset, eval_dataset = create_dataset(
-        config, mid_game_prob=0.7, eval_size=2000
+        config, mid_game_prob=0.7, eval_size=2048
     )
 
     config_kwargs = {
@@ -400,11 +400,11 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        torch_dtype = (
-            model_args.torch_dtype
-            if model_args.torch_dtype in ["auto", None]
-            else getattr(torch, model_args.torch_dtype)
-        )
+        # torch_dtype = (
+        #     model_args.torch_dtype
+        #     if model_args.torch_dtype in ["auto", None]
+        #     else getattr(torch, model_args.torch_dtype)
+        # )
         model = AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -413,8 +413,9 @@ def main():
             revision=model_args.model_revision,
             token=model_args.token,
             trust_remote_code=model_args.trust_remote_code,
-            torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
+            attn_implementation="flash_attention_2",
+            torch_dtype=torch.bfloat16,
         )
     else:
         model = AutoModelForCausalLM.from_config(
