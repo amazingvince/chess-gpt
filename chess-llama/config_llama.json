@@ -6,7 +6,7 @@
   "attention_bias": false,
   "attention_dropout": 0.0,
   "bos_token_id": 0,
-  "eos_token_id": 2,
+  "eos_token_id": 1,
   "head_dim": 32,
   "hidden_act": "silu",
   "hidden_size": 1024,
@@ -26,6 +26,6 @@
   "torch_dtype": "float32",
   "transformers_version": "4.47.0",
   "use_cache": false,
-  "vocab_size": 80
+  "vocab_size": 128
 }
 
