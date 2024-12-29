@@ -9,13 +9,21 @@ import os
 def create_game_from_moves(moves, metadata, stockfish_level):
     """Create a chess.pgn.Game object from a list of moves and metadata."""
     game = chess.pgn.Game()
+    if metadata["played_as_white"] and metadata["winner"] == "model":
+        winner = "1-0"
+    elif metadata["played_as_white"] and metadata["winner"] == "stockfish":
+        winner = "0-1"
+    elif not metadata["played_as_white"] and metadata["winner"] == "model":
+        winner = "0-1"
+    else:
+        winner = "1-0"
 
     # Set game metadata
     game.headers["Event"] = f"AI Chess Game (Stockfish Level {stockfish_level})"
     game.headers["Date"] = datetime.datetime.now().strftime("%Y.%m.%d")
-    game.headers["White"] = "stockfish" if metadata["played_as_white"] else "model"
-    game.headers["Black"] = "model" if metadata["played_as_white"] else "stockfish"
-    game.headers["Result"] = "1-0" if metadata["winner"] == "stockfish" else "0-1"
+    game.headers["White"] = "model" if metadata["played_as_white"] else "stockfish"
+    game.headers["Black"] = "stockfish" if metadata["played_as_white"] else "model"
+    game.headers["Result"] = winner
     game.headers["EndReason"] = metadata["reason"]
     game.headers["Duration"] = str(metadata["duration"])
     game.headers["FailedMovesLocal"] = str(metadata["failed_moves_local"])

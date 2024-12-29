@@ -38,7 +38,7 @@ NUM_EPOCHS=1
 LEARNING_RATE=3e-4
 WARMUP_RATIO=3000
 BATCH_SIZE=512
-EVAL_BATCH_SIZE=512
+EVAL_BATCH_SIZE=256
 WEIGHT_DECAY=0.01
 
 # optimizer
@@ -72,7 +72,7 @@ DEEPSPEED_CONFIG="deepspeed.json"
 # runtime directory
 mkdir -p $RUNTIME_DIR
 echo "runtime directory: $RUNTIME_DIR"
-
+#     --config_name "/home/vince/code/chess-gpt/chess-llama/config_llama.json" \
 #  --config_file accelerate.yaml \
 ACCELERATE_LOG_LEVEL=info accelerate launch --multi_gpu --num_processes 2 run_clm.py \
     --dataset_name "$DATASET_TAG" \
@@ -80,7 +80,7 @@ ACCELERATE_LOG_LEVEL=info accelerate launch --multi_gpu --num_processes 2 run_cl
     --do_train \
     --do_eval \
     --streaming True \
-    --config_name "/home/vince/code/chess-gpt/chess-llama/config_llama.json" \
+    --model_name_or_path "/home/vince/code/chess-gpt/tokenizer_building/runtime/autoregressive/chess-llama-decoder-2048/checkpoint-10000" \
     --num_train_epochs $NUM_EPOCHS \
     --save_strategy $SAVE_STRATEGY \
     --evaluation_strategy $EVAL_STRATEGY \

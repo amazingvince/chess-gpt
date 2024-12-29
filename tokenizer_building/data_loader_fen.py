@@ -290,6 +290,7 @@ class ChessProcessor:
                     starting_fen = board.fen()
                 except Exception as e:
                     logger.error(f"Error processing Chess960 FEN: {str(e)}")
+                    logger.error(f"Raw FEN: {starting_fen}")
                     return self._create_invalid_example(source)
 
         # Special handling by source
@@ -788,7 +789,7 @@ class ChessProcessor:
 
 
 def create_dataset(
-    config: Dict[str, float], eval_size: int = 2000, mid_game_prob: float = 0.0
+    config: Dict[str, float], eval_size: int = 2048, mid_game_prob: float = 0.0
 ) -> Tuple[Dataset, Dataset]:
     """
     Create training and evaluation datasets by interleaving from multiple sources.
@@ -827,7 +828,7 @@ def create_dataset(
     combined = interleave_datasets(
         datasets,
         probabilities=probabilities,
-    )
+    ).shuffle(seed=42)
 
     # Split into eval and train
     eval_dataset = combined.take(eval_size)
