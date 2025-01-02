@@ -92,11 +92,11 @@ class ChessModel:
         game_state = self._build_game_state(board)
 
         # 2 ways starting from current fen or from scratch
-        # start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        # text = self.build_input_text(start_fen, game_state)
+        start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        text = self.build_input_text(start_fen, game_state)
 
-        fen = board.fen()
-        text = self.build_input_text(fen, "")
+        # fen = board.fen()
+        # text = self.build_input_text(fen, "")
 
         move_encodings = self.tokenizer(text, return_tensors="pt").to(self.model.device)
 
@@ -170,13 +170,31 @@ class ChessGame:
         self.verbose = verbose
         self.opening_book = OpeningBook()
 
-    def play_game(self, stockfish_level: int, local_plays_white: bool) -> GameResult:
+    def play_game(self, stockfish_elo: int, local_plays_white: bool) -> GameResult:
         """Play a single game and return the result."""
         if not os.path.exists(self.stockfish_path):
             raise FileNotFoundError("Stockfish binary not found.")
 
         engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
-        engine.configure({"Skill Level": stockfish_level})
+
+        # Configure Stockfish with ELO rating
+        # Minimum ELO is 1320 for UCI_Elo
+        stockfish_elo = max(1320, min(2800, stockfish_elo))
+
+        # For ELOs below 1320, we'll only use skill level
+        if stockfish_elo <= 1320:
+            # Map lower ELOs to skill levels 0-8
+            skill_level = int((stockfish_elo - 800) / (1320 - 800) * 8)
+            engine.configure({"Skill Level": max(0, min(8, skill_level))})
+        else:
+            # For higher ELOs, use both UCI_Elo and skill level
+            engine.configure(
+                {
+                    "UCI_LimitStrength": True,
+                    "UCI_Elo": stockfish_elo,
+                    "Skill Level": min(20, (stockfish_elo - 1320) // 75 + 8),
+                }
+            )
 
         try:
             board = chess.Board()
@@ -221,6 +239,10 @@ class ChessGame:
                     if self.verbose:
                         print(f"\nMove: {move.uci()}")
                         print(board)
+                        if not is_local_turn:
+                            print(
+                                f"Stockfish (ELO {stockfish_elo}) played: {move.uci()}"
+                            )
 
             return self._create_game_result(
                 board, moves_played, failed_moves, start_time, local_plays_white
@@ -288,18 +310,19 @@ class ChessGame:
 
 def main():
     config = {
-        "model_path": "/home/vince/code/chess-gpt/tokenizer_building/runtime/autoregressive/chess-llama-decoder-2048",
-        "stockfish_path": "/home/vince/code/chess-gpt/stockfish/stockfish/stockfish-ubuntu-x86-64-avx512",
-        "stockfish_levels": [0, 5, 10, 15, 20],
-        "games_per_level": 5,
+        "model_path": "amazingvince/chess-llama-full-2048",
+        "stockfish_path": "/home/vincent/Documents/stockfish-ubuntu-x86-64-vnni512/stockfish/stockfish-ubuntu-x86-64-vnni512",
+        # Adjusted ELO ratings considering the 1320 minimum
+        "stockfish_elos": [800, 1000, 1320, 1600, 2000, 2400, 2800],
+        "games_per_elo": 5,
         "stockfish_time": 1.0,
         "verbose": False,
     }
 
     results = {}
-    for level in config["stockfish_levels"]:
-        level_results = []
-        print(f"\nPlaying games against Stockfish level {level}")
+    for elo in config["stockfish_elos"]:
+        elo_results = []
+        print(f"\nPlaying games against Stockfish ELO {elo}")
 
         game = ChessGame(
             config["model_path"],
@@ -308,11 +331,11 @@ def main():
             config["verbose"],
         )
 
-        for i in range(config["games_per_level"]):
-            print(f"\nGame {i+1} of {config['games_per_level']}")
+        for i in range(config["games_per_elo"]):
+            print(f"\nGame {i+1} of {config['games_per_elo']}")
             local_plays_white = random.choice([True, False])
-            result = game.play_game(level, local_plays_white)
-            level_results.append(
+            result = game.play_game(elo, local_plays_white)
+            elo_results.append(
                 {
                     "winner": result.winner,
                     "reason": result.reason,
@@ -321,20 +344,15 @@ def main():
                     "failed_moves_local": result.failed_moves_local,
                     "failed_moves_stockfish": result.failed_moves_stockfish,
                     "played_as_white": result.played_as_white,
-                    "moves": result.moves,  # Include moves in the JSON output
+                    "moves": result.moves,
                 }
             )
 
-        results[level] = level_results
+        results[elo] = elo_results
 
     # Save results
     os.makedirs("results", exist_ok=True)
-    with open("results/chess_results.json", "w") as f:
-        json.dump(results, f, indent=2)
-
-    # Save results
-    os.makedirs("results", exist_ok=True)
-    with open("results/chess_results.json", "w") as f:
+    with open("results/chess_results_elo.json", "w") as f:
         json.dump(results, f, indent=2)
 
 

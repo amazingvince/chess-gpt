@@ -1,3 +1,6 @@
 wandb
 stockfish
 *__pycache__*
+tokenizer_building/chess_games/*
+tokenizer_building/chess_training_dataset/*
+tokenizer_building/results/*

@@ -78,7 +78,8 @@ def generate_game_pgns(json_data, output_dir="chess_games"):
 def main():
     # Read the JSON data from file
     with open(
-        "/home/vince/code/chess-gpt/tokenizer_building/results/chess_results.json", "r"
+        "/home/vincent/Documents/chess-gpt/tokenizer_building/results/chess_results.json",
+        "r",
     ) as f:
         data = json.load(f)
 

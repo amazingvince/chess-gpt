@@ -614,7 +614,8 @@ class ChessProcessor:
 
         return move_uci
 
-    def _calculate_elo(self, example: Dict) -> float:
+    @staticmethod
+    def _calculate_elo(example: Dict) -> float:
         """Calculate average ELO rating from WhiteElo and BlackElo.
 
         Args:
@@ -667,6 +668,19 @@ class ChessProcessor:
         if is_mate:
             return max(min(score, 9999), -9999)
         return score
+
+    @staticmethod
+    def _game_completion(example: Dict):
+        """Check if a game is complete based on termination reason."""
+        return example.get("Termination", "").lower() in ["normal"]
+
+    @staticmethod
+    def _game_is_rated_and_not_speed(example: Dict):
+        """Check if a game is complete based on termination reason."""
+        event = example.get("Event", "").lower()
+        if "rated" in event and "bullet" not in event:
+            return True
+        return False
 
     @classmethod
     def add_eos_token(
@@ -789,7 +803,11 @@ class ChessProcessor:
 
 
 def create_dataset(
-    config: Dict[str, float], eval_size: int = 2048, mid_game_prob: float = 0.0
+    config: Dict[str, float],
+    eval_size: int = 2048,
+    mid_game_prob: float = 0.0,
+    seed: int = 42,
+    filter_2k_plus: bool = False,
 ) -> Tuple[Dataset, Dataset]:
     """
     Create training and evaluation datasets by interleaving from multiple sources.
@@ -805,11 +823,27 @@ def create_dataset(
 
         dataset_info = ChessProcessor.DATASET_CONFIGS[name]
 
-        # Load the dataset with its specific configuration
-        dataset = load_dataset(
-            dataset_info["path"],
-            streaming=True,
-        )["train"]
+        if filter_2k_plus and name in [
+            "lichess_games",
+            "lichess_960",
+            "lichess_antichess",
+            "lichess_atomic",
+        ]:
+            dataset = (
+                load_dataset(
+                    dataset_info["path"],
+                    streaming=True,
+                )["train"]
+                .filter(lambda x: ChessProcessor._calculate_elo(x) > 2000)
+                .filter(lambda x: ChessProcessor._game_completion(x))
+                .filter(lambda x: ChessProcessor._game_is_rated_and_not_speed(x))
+            )
+        else:
+            # Load the dataset with its specific configuration
+            dataset = load_dataset(
+                dataset_info["path"],
+                streaming=True,
+            )["train"]
 
         # Create a closure to ensure the source name is properly captured
         def process_with_source(example, src_name=name):
@@ -828,7 +862,7 @@ def create_dataset(
     combined = interleave_datasets(
         datasets,
         probabilities=probabilities,
-    ).shuffle(seed=42)
+    ).shuffle(seed=seed)
 
     # Split into eval and train
     eval_dataset = combined.take(eval_size)

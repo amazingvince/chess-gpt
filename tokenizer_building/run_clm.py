@@ -343,19 +343,32 @@ def main():
     # from data_loader import create_dataset
     from data_loader_fen import create_dataset
 
-    # Example configuration
+    # main training
+    # config = {
+    #     "lichess_games": 0.3,
+    #     "lichess_960": 0.1,
+    #     "lichess_antichess": 0.05,
+    #     "lichess_atomic": 0.05,
+    #     "puzzles": 0.2,
+    #     "laion_games": 0.3,
+    # }
+
+    # Create datasets with 70% chance of mid-game starts
+    # train_dataset, eval_dataset = create_dataset(
+    #     config, mid_game_prob=0.7, eval_size=2048
+    # )
+
+    # strong only
     config = {
         "lichess_games": 0.3,
         "lichess_960": 0.1,
-        "lichess_antichess": 0.05,
-        "lichess_atomic": 0.05,
-        "puzzles": 0.2,
+        "puzzles": 0.3,
         "laion_games": 0.3,
     }
 
     # Create datasets with 30% chance of mid-game starts
     train_dataset, eval_dataset = create_dataset(
-        config, mid_game_prob=0.7, eval_size=2048
+        config, mid_game_prob=0.3, eval_size=2048, strong_only=True
     )
 
     config_kwargs = {
