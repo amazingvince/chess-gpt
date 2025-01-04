@@ -360,9 +360,9 @@ def main():
 
     # strong only
     config = {
-        "lichess_games": 0.3,
-        "lichess_960": 0.1,
-        "puzzles": 0.3,
+        "lichess_games": 0.25,
+        "lichess_960": 0.05,
+        "puzzles": 0.4,
         "laion_games": 0.3,
     }
 

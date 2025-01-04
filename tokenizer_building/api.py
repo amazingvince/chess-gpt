@@ -1,30 +1,29 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from fastapi.staticfiles import StaticFiles
 import json
 import torch
-from typing import Dict, List
 import chess
-from fastapi.responses import HTMLResponse, FileResponse
 from fen_utils import tokenize_fen
 
 app = FastAPI()
 
-# Add CORS middleware to allow requests from the chess UI
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your actual origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Model and tokenizer initialization
-MODEL_NAME = "amazingvince/chess-llama-full-2048"  # "amazingvince/chess-llama-decoder-2048"  # Replace with your preferred model
+# Constants
+DEFAULT_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+MODEL_NAME = "/home/vincent/Documents/chess-gpt/tokenizer_building/output"
 
+# Model initialization
 print(f"Loading model {MODEL_NAME}...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(
@@ -33,7 +32,6 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# Create a pipeline for text generation
 generator = pipeline(
     "text-generation",
     model=model,
@@ -55,64 +53,102 @@ class GenerateRequest(BaseModel):
     temperature: float
 
 
-def convert_uci_to_san(fen, uci_move):
-    # Create a board from the FEN string
-    board = chess.Board(fen)
+def convert_uci_to_san(fen: str, uci_move: str) -> str:
+    """Convert UCI move to SAN notation."""
+    try:
+        board = chess.Board(fen)
+        move = chess.Move.from_uci(uci_move)
+        return board.san(move)
+    except (chess.InvalidMoveError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid move: {str(e)}")
 
-    # Parse the UCI move
-    move = chess.Move.from_uci(uci_move)
 
-    # Convert to SAN
-    san = board.san(move)
+def convert_san_to_uci(fen: str, san_moves: str) -> List[str]:
+    """Convert SAN moves to UCI format."""
+    try:
+        board = chess.Board(fen)
+        uci_moves = []
 
-    return san
+        # Handle empty moves
+        if not san_moves or san_moves.isspace():
+            return []
+
+        san_moves_list = san_moves.split()
+
+        for san_move in san_moves_list:
+            try:
+                move = board.parse_san(san_move)
+                uci_moves.append(move.uci())
+                board.push(move)
+            except chess.InvalidMoveError:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid SAN move: {san_move}"
+                )
+
+        return uci_moves
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing moves: {str(e)}")
 
 
 def build_input_text(fen: str, moves: str) -> str:
+    """Build the input text for the model."""
     return f"<|start|> <|above_2000|> <|standard|> {tokenize_fen(fen)} <|sep|> {moves} {'<|turn|>' if moves else ''}"
 
 
-def parse_move(decoded_output: str) -> Optional[str]:
-    """Attempt to parse a UCI move from the model's raw output."""
-    try:
-        parts = decoded_output.split("<|turn|>")[0]
-        parts = parts.strip().split(" ")
+def process_moves(moves: list) -> str:
+    """Format moves list into the expected string format."""
+    formatted_moves = []
+    for move in moves:
+        from_square = move[:2]
+        to_square = move[2:4]
+        promotion = f" {move[4].lower()}" if len(move) > 4 else ""
+        formatted_moves.append(f"{from_square} {to_square}{promotion}")
 
+    return " <|turn|> ".join(formatted_moves)
+
+
+def parse_move(decoded_output: str) -> Optional[str]:
+    """Parse UCI move from model output."""
+    try:
+        parts = decoded_output.split("<|turn|>")[0].strip().split()
         return "".join(parts)
     except Exception:
         return None
 
 
-def format_prompt(messages: List[Message]) -> str:
-    """Format messages into a single prompt string."""
+def format_prompt(messages: List[Message]) -> Tuple[str, str, str]:
+    """Format messages into a prompt string."""
     try:
-        # Get the user message content which contains the JSON data
         user_message = next(msg for msg in messages if msg.role == "user")
         chess_data = json.loads(user_message.content)
 
-        # {chess_data['legal_moves']}
-        # start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        # will need to change the history to the moves
-        # prompt = build_input_text(, chess_data['history'])
+        if "history" not in chess_data or "FEN" not in chess_data:
+            raise KeyError("Missing required chess data fields")
 
-        prompt = build_input_text(chess_data["FEN"], "")
+        moves = process_moves(convert_san_to_uci(DEFAULT_FEN, chess_data["history"]))
+        prompt = build_input_text(DEFAULT_FEN, moves)
 
         return prompt, chess_data["FEN"], chess_data["history"]
-    except json.JSONDecoder as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON in message content")
-    except KeyError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(
-            status_code=400, detail=f"Missing required chess data field: {str(e)}"
+            status_code=400, detail=f"Invalid JSON in message content: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Error formatting prompt: {str(e)}"
         )
 
 
 @app.post("/generate")
 async def generate(request: GenerateRequest):
+    """Generate a chess move."""
+    fen = DEFAULT_FEN  # Initialize with default FEN
+
     try:
         # Format the prompt from messages
         prompt, fen, history = format_prompt(request.messages)
 
-        # Generate response with the local model
+        # Generate response
         outputs = generator(
             prompt,
             temperature=request.temperature,
@@ -125,16 +161,36 @@ async def generate(request: GenerateRequest):
         generated_text = outputs[0]["generated_text"][len(prompt) :]
         move = parse_move(generated_text)
 
+        if not move:
+            raise ValueError("Failed to parse move from model output")
+
         # Convert the move to SAN notation
         san_move = convert_uci_to_san(fen, move)
 
-        json_response = {"move": san_move, "reasoning": "Because the model said so!"}
-
-        # Return the response in the expected format
-        return {"content": json.dumps(json_response)}
+        return {
+            "content": json.dumps(
+                {"move": san_move, "reasoning": "Model generated move"}
+            )
+        }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Fallback to random move
+        try:
+            board = chess.Board(fen)
+            legal_moves = list(board.legal_moves)
+            if legal_moves:
+                random_move = legal_moves[0].uci()
+                san_move = convert_uci_to_san(fen, random_move)
+                return {
+                    "content": json.dumps(
+                        {"move": san_move, "reasoning": "Fallback: random valid move"}
+                    )
+                }
+        except Exception as fallback_error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate move and fallback also failed: {str(fallback_error)}",
+            )
 
 
 if __name__ == "__main__":
