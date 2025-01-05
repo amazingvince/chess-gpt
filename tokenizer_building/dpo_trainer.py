@@ -147,7 +147,7 @@ def main(model_name, dataset_name, output_dir):
 
     DPO_Config = DPOConfig(
         # Small learning rate to prevent catastrophic forgetting
-        learning_rate=1e-6,
+        learning_rate=1e-5,
         beta=0.1,
         # Linear learning rate decay over training
         lr_scheduler_type="cosine",
@@ -165,7 +165,7 @@ def main(model_name, dataset_name, output_dir):
         # Memory-efficient optimizer for CUDA, falls back to adamw_torch for CPU/MPS
         optim="adamw_torch",
         # Number of training epochs
-        num_train_epochs=1,
+        num_train_epochs=2,
         save_steps=1000,
         save_total_limit=1,
         # When to run evaluation
@@ -179,7 +179,7 @@ def main(model_name, dataset_name, output_dir):
         # Disable external logging
         report_to="wandb",
         # Where to save model/checkpoints
-        output_dir="./results_v2/",
+        output_dir="./results_v3/",
         bf16=True,
         tf32=True,
         remove_unused_columns=False,
@@ -206,7 +206,7 @@ def main(model_name, dataset_name, output_dir):
 
 if __name__ == "__main__":
     # Set basic parameters
-    model_name = "amazingvince/chess-llama-pretrain"
+    model_name = "amazingvince/chess-llama-pretrain-phase"
     dataset_name = "amazingvince/chess_dpo"
-    output_dir = "output_v2/"
+    output_dir = "output_v3/"
     main(model_name=model_name, dataset_name=dataset_name, output_dir=output_dir)

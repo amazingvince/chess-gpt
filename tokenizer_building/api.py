@@ -7,6 +7,7 @@ import json
 import torch
 import chess
 from fen_utils import tokenize_fen
+import random
 
 app = FastAPI()
 
@@ -21,7 +22,7 @@ app.add_middleware(
 
 # Constants
 DEFAULT_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-MODEL_NAME = "/home/vincent/Documents/chess-gpt/tokenizer_building/output"
+MODEL_NAME = "amazingvince/chess-llama-pretrain-phase"
 
 # Model initialization
 print(f"Loading model {MODEL_NAME}...")
@@ -70,7 +71,7 @@ def convert_san_to_uci(fen: str, san_moves: str) -> List[str]:
         uci_moves = []
 
         # Handle empty moves
-        if not san_moves or san_moves.isspace():
+        if not san_moves or san_moves.isspace() or san_moves == "Opening position":
             return []
 
         san_moves_list = san_moves.split()
@@ -90,9 +91,12 @@ def convert_san_to_uci(fen: str, san_moves: str) -> List[str]:
         raise HTTPException(status_code=400, detail=f"Error processing moves: {str(e)}")
 
 
-def build_input_text(fen: str, moves: str) -> str:
+def build_input_text(fen: str, moves: str, from_fen: bool = False) -> str:
     """Build the input text for the model."""
-    return f"<|start|> <|above_2000|> <|standard|> {tokenize_fen(fen)} <|sep|> {moves} {'<|turn|>' if moves else ''}"
+    if from_fen:
+        return f"<|start|> <|above_2000|> <|standard|> {tokenize_fen(fen)} <|sep|>"
+    else:
+        return f"<|start|> <|above_2000|> <|standard|> {tokenize_fen(DEFAULT_FEN)} <|sep|> {moves} {'<|turn|>' if moves else ''}"
 
 
 def process_moves(moves: list) -> str:
@@ -116,7 +120,7 @@ def parse_move(decoded_output: str) -> Optional[str]:
         return None
 
 
-def format_prompt(messages: List[Message]) -> Tuple[str, str, str]:
+def format_prompt(messages: List[Message], from_fen=False) -> Tuple[str, str, str]:
     """Format messages into a prompt string."""
     try:
         user_message = next(msg for msg in messages if msg.role == "user")
@@ -126,7 +130,7 @@ def format_prompt(messages: List[Message]) -> Tuple[str, str, str]:
             raise KeyError("Missing required chess data fields")
 
         moves = process_moves(convert_san_to_uci(DEFAULT_FEN, chess_data["history"]))
-        prompt = build_input_text(DEFAULT_FEN, moves)
+        prompt = build_input_text(chess_data["FEN"], moves, from_fen=from_fen)
 
         return prompt, chess_data["FEN"], chess_data["history"]
     except json.JSONDecodeError as e:
@@ -146,7 +150,8 @@ async def generate(request: GenerateRequest):
 
     try:
         # Format the prompt from messages
-        prompt, fen, history = format_prompt(request.messages)
+        from_fen = random.choice([True, False])
+        prompt, fen, history = format_prompt(request.messages, from_fen=from_fen)
 
         # Generate response
         outputs = generator(
@@ -169,13 +174,17 @@ async def generate(request: GenerateRequest):
 
         return {
             "content": json.dumps(
-                {"move": san_move, "reasoning": "Model generated move"}
+                {
+                    "move": san_move,
+                    "reasoning": f"Model generated move. {'From fen' if from_fen else 'From history'}",
+                }
             )
         }
 
     except Exception as e:
         # Fallback to random move
         try:
+            print(f"Fallback to random move: {str(e)}")
             board = chess.Board(fen)
             legal_moves = list(board.legal_moves)
             if legal_moves:
@@ -196,4 +205,4 @@ async def generate(request: GenerateRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8008)
